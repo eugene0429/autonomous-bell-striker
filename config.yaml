@@ -1,0 +1,202 @@
+# Capstone 2026 — runtime parameters (single source of truth)
+#
+# Used by:
+#   pipeline.py                  (full pipeline)
+#   run_phase1_visual_servo.py   (Phase 1 only)
+#   run_phase2_aiming.py         (Phase 2 only)
+#   run_center_depth_probe.py    (depth probe)
+#
+# CLI 토글 (--mode / --dry-run / --debug-detect) 은 yaml 값을 덮어쓴다.
+# 그 외 모든 수치/문자열은 여기서만 바꾸면 된다.
+
+# ── 실행 모드 (pipeline.py 전용) ──
+mode: real                       # sim | real
+
+# ── 차량 기하 ──
+vehicle:
+  wheel_diameter: 0.10
+  wheel_base: 0.30
+
+# ── 제어 루프 ──
+loop:
+  dt: 0.067                      # 15 Hz
+
+# ── 시작 자세 (sim 전용) ──
+sim_start:
+  x: 0.0
+  y: 0.0
+  theta_deg: 0.0
+
+# ── Phase 1 (visual servo) ──
+phase1:
+  timeout_sec: 60.0
+  log_every_s: 0.5
+
+  # VisualServoController 게인/리미트 (감속 거동에 직접 영향)
+  controller:
+    # 영상 프레임 (해상도 바꿀 때만 수정)
+    img_w: 640
+    img_h: 480
+
+    # 헤딩 PID
+    kp_h: 0.003                  # (rad/s)/px
+    ki_h: 0.0003
+    kd_h: 0.0
+
+    # 틸트 PI
+    kp_tilt: 0.05                # deg/px
+    ki_tilt: 0.0
+    tilt_min_deg: 0.0
+    tilt_max_deg: 95.0
+    # mast 물리 slew 에 맞춰 cap (open-loop TILT_ASYNC → cmd 가 실물 추월하면
+    # tilt-stop 조기 trigger 됨). 실측해서 조정. null = unlimited (legacy).
+    tilt_max_rate_dps: 60.0
+
+    # 전진 속도
+    kp_v: 1.2                    # v = kp_v * horiz_dist * align
+    v_max: 0.17                   # [m/s]
+    omega_max: 0.4               # [rad/s]
+
+    # 정지 조건 (감속 튜닝의 핵심)
+    d_stop_m: 0.5                # filtered horiz_dist < 이 값이면 stop 후보
+    tilt_stop_range_deg: [85.0, 95.0]
+    stop_debounce_frames: 4      # N 프레임 연속 만족해야 DONE (관성 보상)
+    # Tilt-based approach brake: tilt_cmd 가 이 각도부터 stop_range[0]=85°
+    # 사이에서 v 를 1.0 → 0 으로 선형 감속. tilt 가 거리 proxy 역할 (종이
+    # 머리 위에 가까울수록 tilt 높음) 이라 depth 가 깨져도 부드럽게 정지.
+    # null = disabled (즉 stop 직전까지 v_max 로 cruise).
+    tilt_brake_start_deg: 65.0
+
+    # Post-stop fine alignment: stop 트리거 후 아주 느린 속도로 전후진하여
+    # horiz_dist 를 d_stop_m 에 정밀 정렬. tilt_brake 가 켜진 현재 설정에서는
+    # 정지 시점 horiz 가 target 보다 가깝거나 멀 수 있어 후처리 정렬이 필요.
+    # heading / tilt 는 그대로 동결 (omega=0, tilt_cmd hold).
+    align_enabled: false
+    align_v: 0.03                # [m/s] 정렬 속도 (느릴수록 정확, 길어짐)
+    align_tol_m: 0.01            # |horiz - d_stop_m| < 이 값이면 만족
+    align_debounce_frames: 3     # 만족 N 프레임 연속 → DONE
+    align_timeout_s: 5.0        # 정렬 못 끝내도 N초 후 강제 DONE
+
+    # 진동 강건성
+    horiz_dist_lp_alpha: 0.2     # LPF α on horiz_dist
+    tilt_err_deadband_px: 8
+
+    # FSM lost-handling
+    coast_lost_frames: 8
+    hold_lost_frames: 15
+    coast_speed_scale: 1.0
+    # SEARCH 동작: 회전 대신 전진 creep. 종은 보통 정면 부근에 있으니
+    # 헤딩 락을 유지한 채 천천히 전진하다 재포착하는 편이 안전.
+    search_creep_v: 0.05           # [m/s]
+    search_timeout_s: 15.0
+
+  # Bootstrap (초기 sweep + creep retry)
+  bootstrap:
+    creep_v: 0.2
+    creep_s: 3.0
+    creep_retries: 3
+
+  # Sim 전용 dummy target / noise
+  sim:
+    x: 3.0
+    y: 2.0
+    bbox_noise_px: 0.0
+    depth_noise_m: 0.0
+    dropout_prob: 0.0
+
+# ── Phase 2 (aiming & strike) ──
+phase2:
+  num_strikes: 3
+  strike_interval_sec: 3.0
+  tilt_settle_sec: 0.5
+  plate_settle_sec: 0.3
+  tilt_deg: 90.0
+
+  # 조준 모드: static | lead | center
+  aim_mode: center
+  static_reuse: false            # static aim 시 첫 측정값 재사용 (legacy --static)
+
+  # 측정창 (static mode)
+  measurement:
+    duration_sec: 1.0
+    min_frames: 15
+    min_conf: 0.5
+    depth_roi_frac: 0.4
+    depth_min_valid: 10
+
+  # Launcher / camera plate-frame 보정
+  launcher:
+    offset: [-0.01, 0.0, 0.0]    # x, y, z [m]
+    tilt_deg: [-4.0, 0.0]        # x_tilt, y_tilt [deg]
+  camera:
+    offset: [0.157, -0.010, -0.074]   # plate-frame translation [m]
+
+  # Sim 전용 dummy target
+  sim:
+    x: 0.10
+    y: 0.0
+    z: 3.0
+    jitter: 0.05
+
+  # Lead-aim (수직 진동 종)
+  lead:
+    amplitude_m: 0.25
+    half_period_min_s: 3.0
+    half_period_max_s: 6.0
+    total_delay_sec: 0.7
+    inter_shot_sec: 3.0
+    spin_warmup_sec: 1.0
+    max_wait_sec: 15.0
+    safety_margin_m: 0.03
+
+  # Center-aim (수직 진동, plate 정적)
+  center:
+    calibration_sec: 0
+    z_top: 2.073
+    z_bot: 1.765
+    bell_diameter: 0.12
+    safety_margin_m: 0.01
+    fit_window_samples: 0
+    direction_streak: 3
+    direction_streak_eps: 0.005
+    # ready/endpoint 판정의 최소 |v̂| [m/s]. 이 값보다 작으면 종이 거의 멈춘
+    # 것으로 보고 발사 거부 + endpoint 감지도 보류. 진폭/속도가 작은 진동을
+    # 잡고 싶으면 줄이고, 노이즈에 더 보수적이려면 키움. 기본 0.03 = 3 cm/s.
+    endpoint_v_eps_mps: 0.01
+    total_delay_sec: 1.3
+    inter_shot_sec: 3.0
+    xy_meas_sec: 0.5
+    spin_warmup_sec: 1.5
+    max_wait_sec: 20.0
+
+# ── Detector backend ──
+detector:
+  backend: hailo                 # hailo | ultralytics
+  conf: 0.3
+  device: "0"                    # ultralytics: '0' | 'cpu' | 'mps'
+  weights: null                  # ultralytics .pt path (null = auto)
+  hef: null                      # hailo .hef path (null = auto)
+  classes: null                  # int list filter (ultralytics)
+
+# ── OpenRB serial ──
+serial:
+  port: /dev/ttyACM0
+  baud: 115200
+  dry_run: false
+
+# ── Flywheel + loader ──
+fire:
+  rpm: 3000
+  hold_ms: 1500
+
+# ── debug toggles ──
+debug:
+  detect: false                  # phase 1 per-frame raw detection log
+
+# ── Depth probe (run_center_depth_probe.py 전용) ──
+probe:
+  conf: 0.6
+  roi_frac: 0.3
+  min_valid: 10
+  max_frames: 0                  # 0 = run until Ctrl-C
+  hw_reset: false

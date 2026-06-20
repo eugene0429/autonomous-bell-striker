@@ -1,0 +1,56 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# C++ / Build
+build/
+*.o
+*.out
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+venv/
+.venv/
+
+# Data
+perception/dataset/
+perception/dataset_v1/
+
+# ML weights (managed separately, e.g. git-lfs or external storage)
+*.pt
+*.onnx
+*.engine
+*.hef
+
+# Hailo SDK installers (not redistributable; download per-user from hailo.ai)
+*.whl
+hailort*.deb
+
+# Archived tooling bundles (kept off-repo; use perception/data_collection/labeler.py)
+*.zip
+
+# Training (generated artifacts)
+perception/training/data/
+perception/training/runs/
+perception/training/dataset.yaml
+perception/training/weights/
+
+# Local debugging scripts (kept off-repo; broken against current firmware
+# after diagnostic command/STATUS-field removals — preserved for reference)
+debug_scripts/
+
+# Claude Code local settings
+.claude/
+
+# Runtime logs / artifacts
+hailort*.log
+aimlog.txt
+*.png
+perception/vio/port.txt

@@ -1,0 +1,883 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Phase 2 Aiming — Center-Aim with Predictive Firing</title>
+<style>
+  * { box-sizing: border-box; }
+  body { background: #0f1220; color: #e6e8f2;
+    font-family: -apple-system, "SF Pro Text", "Pretendard", system-ui, sans-serif;
+    margin: 0; padding: 24px; }
+  h1 { font-size: 18px; margin: 0 0 4px 0; font-weight: 600; }
+  .sub { font-size: 12px; color: #8a91b4; margin: 0 0 20px 0; max-width: 820px;
+    line-height: 1.55; }
+  h2 { font-size: 11px; color: #8a91b4; margin: 0 0 10px 0;
+    text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600; }
+  .panel { background: #161a2e; border: 1px solid #2a3055; border-radius: 10px;
+    padding: 16px; max-width: 780px; }
+  canvas { display: block; background: #050714; border-radius: 6px;
+    border: 1px solid #2a3055; width: 100%; height: auto; }
+  .status { margin-top: 12px; font-family: "SF Mono", ui-monospace, monospace;
+    font-size: 12px; color: #94a3b8; min-height: 1.4em; }
+  .controls { display: flex; gap: 10px; align-items: center;
+    margin-top: 18px; flex-wrap: wrap; }
+  button { background: #1d2240; color: #e6e8f2; border: 1px solid #2a3055;
+    border-radius: 6px; padding: 8px 16px; font-size: 13px; cursor: pointer;
+    font-family: inherit; }
+  button:hover { border-color: #7c5cff; background: #262b50; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .gif-status { font-family: "SF Mono", ui-monospace, monospace;
+    font-size: 12px; color: #94a3b8; }
+</style>
+</head>
+<body>
+
+<h1>Phase 2 Aiming — Center-Aim with Predictive Firing</h1>
+<p class="sub">After Phase 1, the camera sits exactly under the bell — but the launcher is mounted on a
+leveling platform offset from the camera on the rover. The bell follows a triangle-wave motion
+(constant velocity within each half-period, random speed re-sampled at every endpoint). The system
+(1) calibrates Y_min / Y_max of the bell trajectory for 10 s, (2) aims the launcher at the
+trajectory midpoint Y_mid, (3) tracks the bell, (4) on LOAD, computes ball flight time τ and
+waits until firing τ seconds before the bell crosses Y_mid, then fires.</p>
+
+<div class="panel">
+  <h2>Side View</h2>
+  <canvas id="cv" width="760" height="440"></canvas>
+  <div class="status" id="status">idle</div>
+</div>
+
+<div class="controls">
+  <button id="reset">↺ Replay</button>
+  <button id="save-gif">⬇ Download as GIF</button>
+  <span id="gif-status" class="gif-status"></span>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.js"></script>
+<script>
+// ─────────── Bell motion (triangle wave, random per-half-period speed) ───────────
+const Y_MIN_TRUE = 1.40;
+const Y_MAX_TRUE = 1.80;
+const Y_MID = (Y_MIN_TRUE + Y_MAX_TRUE) / 2;   // 1.60
+const Y_AMP_HALF = Y_MAX_TRUE - Y_MIN_TRUE;    // 0.40
+const SPEED_MIN = 0.32, SPEED_MAX = 0.78;      // [m/s] sampled at each endpoint
+
+let bellSchedule = [];   // [{t0, t1, y0, y1, v}, ...]
+
+function buildBellSchedule() {
+  bellSchedule = [];
+  let t = 0, y = Y_MIN_TRUE, dir = +1;
+  const maxT = 40.0;
+  while (t < maxT) {
+    const speed = SPEED_MIN + (SPEED_MAX - SPEED_MIN) * Math.random();
+    const dur = Y_AMP_HALF / speed;
+    bellSchedule.push({
+      t0: t, t1: t + dur,
+      y0: y, y1: y + dir * Y_AMP_HALF,
+      v: dir * speed,
+    });
+    t += dur;
+    y += dir * Y_AMP_HALF;
+    dir = -dir;
+  }
+}
+
+function bellY(t) {
+  for (const s of bellSchedule) {
+    if (t >= s.t0 && t < s.t1) {
+      const u = (t - s.t0) / (s.t1 - s.t0);
+      return s.y0 + (s.y1 - s.y0) * u;
+    }
+  }
+  const last = bellSchedule[bellSchedule.length - 1];
+  return last ? last.y1 : Y_MID;
+}
+
+function bellV(t) {
+  for (const s of bellSchedule) if (t >= s.t0 && t < s.t1) return s.v;
+  return 0;
+}
+
+// Earliest t > tFrom where bell crosses Y_MID. (Picks the first segment-interior crossing.)
+function nextYMidCrossing(tFrom) {
+  for (const s of bellSchedule) {
+    if (s.t1 <= tFrom) continue;
+    const lo = Math.min(s.y0, s.y1), hi = Math.max(s.y0, s.y1);
+    if (Y_MID < lo || Y_MID > hi) continue;
+    const u = (Y_MID - s.y0) / (s.y1 - s.y0);
+    const tCross = s.t0 + u * (s.t1 - s.t0);
+    if (tCross > tFrom + 1e-4) return tCross;
+  }
+  return null;
+}
+
+// ─────────── Rover + leveling platform + launcher ───────────
+const BELL_X = 0;                          // bell column world x
+// Rover chassis (camera at front, leveling platform at back, all on one body)
+const ROVER_X1 = -0.45, ROVER_X2 = +0.15;
+const ROVER_TOP = 0.25;
+const CAM_X = 0.0;                         // exactly under bell
+const CAM_MAST_TOP = 0.46;
+// Leveling platform (small box on top of rover, near the back)
+const LEVEL_X1 = -0.42, LEVEL_X2 = -0.20;
+const LEVEL_TOP = 0.36;
+// Launcher pivot sits at the top-center of the leveling platform
+const LAUNCHER_X = (LEVEL_X1 + LEVEL_X2) / 2;  // -0.31
+const LAUNCHER_Y = LEVEL_TOP;
+const LAUNCHER_BARREL_LEN = 0.22;
+const LAUNCHER_INIT_DEG = 90;              // initial: straight up
+const LAUNCHER_AIM_RAD =
+    Math.atan2(Y_MID - LAUNCHER_Y, BELL_X - LAUNCHER_X);
+const LAUNCHER_AIM_DEG = LAUNCHER_AIM_RAD * 180 / Math.PI;
+
+// Ball (straight-line, constant speed)
+const BALL_SPEED = 4.2;                    // [m/s]
+const aimedTip = [
+  LAUNCHER_X + Math.cos(LAUNCHER_AIM_RAD) * LAUNCHER_BARREL_LEN,
+  LAUNCHER_Y + Math.sin(LAUNCHER_AIM_RAD) * LAUNCHER_BARREL_LEN,
+];
+const TAU = Math.hypot(BELL_X - aimedTip[0], Y_MID - aimedTip[1]) / BALL_SPEED;
+
+// ─────────── Phase timing ───────────
+const CALIB_DURATION = 5.0;        // calibration (10 s real-time, compressed)
+const AIM_DURATION = 0.9;
+const TRACK_DURATION = 1.5;
+const LOAD_DURATION = 0.7;
+const COMPUTE_DURATION = 0.6;
+// then wait variable amount until fire window
+const HIT_DURATION = 0.8;
+const HOLD_DURATION = 1.5;
+
+// ─────────── State ───────────
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+let simTime = 0, lastMs = 0, recording = false;
+let trail = [];                            // {t, y} samples for scope
+let calibYMin = +999, calibYMax = -999;
+let tFire = null;
+let computeReady = false;
+
+function currentAimRad() {
+  const s = step();
+  if (s.phase === 'calib') return Math.PI / 2;
+  if (s.phase === 'aim') {
+    const u = s.tIn / AIM_DURATION;
+    const eased = u < 0.5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2;
+    const a0 = Math.PI / 2;
+    return a0 + (LAUNCHER_AIM_RAD - a0) * eased;
+  }
+  return LAUNCHER_AIM_RAD;
+}
+
+function step() {
+  const t = simTime;
+  let acc = 0;
+  if (t < (acc += CALIB_DURATION)) return {phase: 'calib', tIn: t};
+  let prev;
+  prev = acc - CALIB_DURATION;
+  if (t < (acc += AIM_DURATION)) {
+    prev = acc - AIM_DURATION;
+    return {phase: 'aim', tIn: t - prev};
+  }
+  if (t < (acc += TRACK_DURATION)) {
+    prev = acc - TRACK_DURATION;
+    return {phase: 'track', tIn: t - prev};
+  }
+  if (t < (acc += LOAD_DURATION)) {
+    prev = acc - LOAD_DURATION;
+    return {phase: 'load', tIn: t - prev};
+  }
+  if (t < (acc += COMPUTE_DURATION)) {
+    prev = acc - COMPUTE_DURATION;
+    return {phase: 'compute', tIn: t - prev};
+  }
+  if (tFire === null) return {phase: 'compute', tIn: 0};
+  if (t < tFire) return {phase: 'wait', tWait: tFire - t};
+  const inFlight = t - tFire;
+  if (inFlight < TAU) return {phase: 'flight', inFlight};
+  const inHit = inFlight - TAU;
+  if (inHit < HIT_DURATION) return {phase: 'hit', inHit};
+  if (inHit < HIT_DURATION + HOLD_DURATION) {
+    return {phase: 'done', inDone: inHit - HIT_DURATION};
+  }
+  return {phase: 'cycle-end'};
+}
+
+// ─────────── World → pixel (uniform scale, content centered) ───────────
+// Non-uniform scaling makes world angle ≠ pixel angle, which would skew the
+// launcher barrel relative to the aim line. Use one scale for both axes so
+// world geometry matches pixel geometry exactly.
+const X_RANGE = 1.5;             // world x: -1.0 → 0.5
+const Y_RANGE = 2.2;             // world y: 0 → 2.2 (compressed slightly for visual fit)
+function getScale() {
+  const W = cv.width, H = cv.height;
+  return Math.min((W - 60) / X_RANGE, (H - 30 - 28) / Y_RANGE);
+}
+function w2px(x, y) {
+  const W = cv.width, H = cv.height;
+  const scale = getScale();
+  const visW = X_RANGE * scale;
+  const xOffset = (W - visW) / 2;
+  return [xOffset + (x + 1.0) * scale, H - 30 - y * scale];
+}
+
+// ─────────── Primitives ───────────
+function roundedRect(c, x, y, w, h, r) {
+  c.beginPath();
+  c.moveTo(x + r, y);
+  c.lineTo(x + w - r, y);
+  c.quadraticCurveTo(x + w, y, x + w, y + r);
+  c.lineTo(x + w, y + h - r);
+  c.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  c.lineTo(x + r, y + h);
+  c.quadraticCurveTo(x, y + h, x, y + h - r);
+  c.lineTo(x, y + r);
+  c.quadraticCurveTo(x, y, x + r, y);
+  c.closePath();
+}
+
+function drawFloor() {
+  const W = cv.width;
+  const [, fy] = w2px(0, 0);
+  // floor line spans the full canvas width
+  ctx.strokeStyle = 'rgba(230,232,242,0.35)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(0, fy); ctx.lineTo(W, fy); ctx.stroke();
+  // hatching
+  ctx.strokeStyle = 'rgba(230,232,242,0.1)';
+  ctx.lineWidth = 1;
+  const hatchPx = 0.12 * getScale();
+  for (let xpx = 0; xpx < W; xpx += hatchPx) {
+    ctx.beginPath();
+    ctx.moveTo(xpx, fy); ctx.lineTo(xpx - 5, fy + 6);
+    ctx.stroke();
+  }
+  // ceiling band
+  ctx.fillStyle = '#0a1224';
+  ctx.fillRect(0, 0, W, 14);
+}
+
+function drawBell(y, opts = {}) {
+  const [bx, by] = w2px(BELL_X, y);
+  const alpha = opts.alpha != null ? opts.alpha : 1;
+  const sc = opts.scale != null ? opts.scale : 1;
+  const dx = opts.dx || 0;
+  ctx.strokeStyle = 'rgba(230,232,242,' + (0.3 * alpha) + ')';
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.moveTo(bx + dx, 14); ctx.lineTo(bx + dx, by - 12 * sc);
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(251,191,36,' + (0.95 * alpha) + ')';
+  ctx.strokeStyle = 'rgba(146,89,10,' + alpha + ')';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(bx + dx - 17 * sc, by + 11 * sc);
+  ctx.lineTo(bx + dx - 12 * sc, by - 12 * sc);
+  ctx.lineTo(bx + dx + 12 * sc, by - 12 * sc);
+  ctx.lineTo(bx + dx + 17 * sc, by + 11 * sc);
+  ctx.closePath();
+  ctx.fill(); ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(bx + dx, by - 14 * sc, 3 * sc, 0, 2 * Math.PI);
+  ctx.fill(); ctx.stroke();
+  ctx.fillStyle = 'rgba(146,89,10,' + alpha + ')';
+  ctx.beginPath();
+  ctx.arc(bx + dx, by + 9 * sc, 3 * sc, 0, 2 * Math.PI); ctx.fill();
+}
+
+function drawRoverChassis() {
+  const [x1, ybot] = w2px(ROVER_X1, 0);
+  const [x2] = w2px(ROVER_X2, 0);
+  const [, ytop] = w2px(0, ROVER_TOP);
+  const w = x2 - x1, h = ybot - ytop;
+  // shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.beginPath();
+  ctx.ellipse((x1 + x2) / 2, ybot + 4, w * 0.55, 4, 0, 0, 2 * Math.PI);
+  ctx.fill();
+  // body
+  ctx.fillStyle = '#1d2240';
+  ctx.strokeStyle = '#7c5cff';
+  ctx.lineWidth = 2;
+  roundedRect(ctx, x1, ytop, w, h, 5);
+  ctx.fill(); ctx.stroke();
+  // wheels (positioned within rover body footprint)
+  ctx.fillStyle = '#0a1224';
+  ctx.strokeStyle = '#94a3b8';
+  ctx.lineWidth = 1.2;
+  const wheelXs = [-0.35, -0.15, 0.05];
+  wheelXs.forEach(wxw => {
+    const [wxp] = w2px(wxw, 0);
+    ctx.beginPath();
+    ctx.arc(wxp, ybot - 5, 6, 0, 2 * Math.PI);
+    ctx.fill(); ctx.stroke();
+  });
+}
+
+function drawLevelingPlatform() {
+  // Small block sitting on top of rover (back portion). Hosts the launcher pivot.
+  const [x1, ytop_r] = w2px(LEVEL_X1, ROVER_TOP);
+  const [x2] = w2px(LEVEL_X2, ROVER_TOP);
+  const [, ytop_p] = w2px(0, LEVEL_TOP);
+  const w = x2 - x1, h = ytop_r - ytop_p;
+  // platform body
+  ctx.fillStyle = '#262b50';
+  ctx.strokeStyle = '#7c5cff';
+  ctx.lineWidth = 1.5;
+  roundedRect(ctx, x1, ytop_p, w, h, 3);
+  ctx.fill(); ctx.stroke();
+  // pivot mount circle
+  const [pxc, pyc] = w2px(LAUNCHER_X, LAUNCHER_Y);
+  ctx.fillStyle = '#3a3f72';
+  ctx.strokeStyle = '#c4b5fd';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(pxc, pyc, 5, 0, 2 * Math.PI);
+  ctx.fill(); ctx.stroke();
+  // tiny label
+  ctx.fillStyle = 'rgba(196,181,253,0.7)';
+  ctx.font = '8px ui-monospace, monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('leveling platform', (x1 + x2) / 2, ytop_r + 11);
+}
+
+function drawCameraMast() {
+  const [bx, by] = w2px(CAM_X, ROVER_TOP);
+  const [, topY] = w2px(CAM_X, CAM_MAST_TOP);
+  // mast
+  ctx.strokeStyle = '#94a3b8';
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.moveTo(bx, by); ctx.lineTo(bx, topY);
+  ctx.stroke();
+  // camera body (pointing up at tilt=90°)
+  ctx.save();
+  ctx.translate(bx, topY);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillStyle = '#4ade80';
+  ctx.strokeStyle = '#166534';
+  ctx.lineWidth = 1.5;
+  roundedRect(ctx, -4, -6, 20, 12, 2);
+  ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#0a1224';
+  ctx.beginPath();
+  ctx.arc(14, 0, 3, 0, 2 * Math.PI); ctx.fill();
+  ctx.strokeStyle = 'rgba(74,222,128,0.6)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.restore();
+  // small "camera" label
+  ctx.fillStyle = 'rgba(74,222,128,0.7)';
+  ctx.font = '8px ui-monospace, monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('camera', bx, by + 11);
+}
+
+function drawLauncher(aimRad, opts = {}) {
+  const [lx, ly] = w2px(LAUNCHER_X, LAUNCHER_Y);
+  // barrel
+  ctx.save();
+  ctx.translate(lx, ly);
+  ctx.rotate(-aimRad);
+  const blPx = LAUNCHER_BARREL_LEN * getScale();
+  ctx.fillStyle = opts.hot ? '#fb923c' : '#94a3b8';
+  ctx.strokeStyle = '#e6e8f2';
+  ctx.lineWidth = 1.4;
+  roundedRect(ctx, 0, -5, blPx, 10, 3);
+  ctx.fill(); ctx.stroke();
+  // muzzle
+  ctx.fillStyle = '#0a1224';
+  ctx.fillRect(blPx - 5, -4, 4, 8);
+  // flywheel rollers near base (for visual flavor)
+  ctx.fillStyle = '#4b5180';
+  ctx.beginPath();
+  ctx.arc(8, -7, 3.5, 0, 2 * Math.PI); ctx.fill();
+  ctx.beginPath();
+  ctx.arc(8, 7, 3.5, 0, 2 * Math.PI); ctx.fill();
+  ctx.restore();
+  // pivot dot drawn on top so it stays visible
+  ctx.fillStyle = '#c4b5fd';
+  ctx.beginPath();
+  ctx.arc(lx, ly, 2.5, 0, 2 * Math.PI); ctx.fill();
+}
+
+function drawCalibScope() {
+  const W = cv.width;
+  const x0 = W - 195, y0 = 32, w = 180, h = 90;
+  ctx.fillStyle = 'rgba(22,26,46,0.78)';
+  ctx.strokeStyle = 'rgba(124,92,255,0.3)';
+  ctx.lineWidth = 1;
+  ctx.fillRect(x0, y0, w, h); ctx.strokeRect(x0, y0, w, h);
+  ctx.fillStyle = 'rgba(196,181,253,0.7)';
+  ctx.font = '9px ui-monospace, monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('bell y(t) — triangle wave', x0 + 6, y0 + 12);
+
+  if (trail.length < 2) return;
+  const yLo = Y_MIN_TRUE - 0.06, yHi = Y_MAX_TRUE + 0.06;
+  const win = CALIB_DURATION;
+  ctx.strokeStyle = '#c4b5fd';
+  ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  for (let i = 0; i < trail.length; i++) {
+    const dt = simTime - trail[i].t;
+    if (dt > win) continue;
+    const xr = 1 - dt / win;
+    const yr = (trail[i].y - yLo) / (yHi - yLo);
+    const px = x0 + 22 + xr * (w - 30);
+    const py = y0 + h - 10 - yr * (h - 28);
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.stroke();
+
+  // Y_min, Y_max bound lines on scope
+  [['min', calibYMin, 'rgba(239,68,68,0.75)'],
+   ['max', calibYMax, 'rgba(239,68,68,0.75)']].forEach(([k, yv, col]) => {
+    if (!isFinite(yv) || yv === 999 || yv === -999) return;
+    const yr = (yv - yLo) / (yHi - yLo);
+    const py = y0 + h - 10 - yr * (h - 28);
+    ctx.strokeStyle = col;
+    ctx.setLineDash([3, 3]);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x0 + 22, py); ctx.lineTo(x0 + w - 6, py);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = col;
+    ctx.font = '9px ui-monospace, monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText('Y_' + k + '=' + yv.toFixed(2), x0 + w - 6, py - 2);
+  });
+}
+
+// ─────────── Frame draw ───────────
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  drawFloor();
+  const s = step();
+  const ph = s.phase;
+
+  // Bell shake on hit
+  let bellShake = 0, bellScale = 1;
+  if (ph === 'hit') {
+    const t = s.inHit;
+    bellShake = 5 * Math.exp(-t * 4) * Math.sin(t * 38);
+    bellScale = 1 + 0.10 * Math.exp(-t * 3) * Math.cos(t * 25);
+  }
+  const yBell = bellY(simTime);
+
+  // ─── Y bound + Y_mid lines ───
+  if (ph === 'calib') {
+    [calibYMin, calibYMax].forEach((yv, i) => {
+      if (yv === 999 || yv === -999) return;
+      const [, lpy] = w2px(0, yv);
+      ctx.strokeStyle = 'rgba(239,68,68,0.55)';
+      ctx.setLineDash([4, 4]);
+      ctx.lineWidth = 1;
+      const [xx1] = w2px(-0.8, 0), [xx2] = w2px(0.35, 0);
+      ctx.beginPath();
+      ctx.moveTo(xx1, lpy); ctx.lineTo(xx2, lpy);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(239,68,68,0.95)';
+      ctx.font = '10px ui-monospace, monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText((i === 0 ? 'Y_min=' : 'Y_max=') + yv.toFixed(2) + 'm',
+                   xx2 - 4, lpy - 3);
+    });
+  } else {
+    [Y_MIN_TRUE, Y_MAX_TRUE].forEach((yv, i) => {
+      const [, lpy] = w2px(0, yv);
+      ctx.strokeStyle = 'rgba(74,222,128,0.45)';
+      ctx.setLineDash([5, 5]);
+      ctx.lineWidth = 1;
+      const [xx1] = w2px(-0.8, 0), [xx2] = w2px(0.35, 0);
+      ctx.beginPath();
+      ctx.moveTo(xx1, lpy); ctx.lineTo(xx2, lpy);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(74,222,128,0.85)';
+      ctx.font = '10px ui-monospace, monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText((i === 0 ? 'Y_min=' : 'Y_max=') + yv.toFixed(2) + 'm',
+                   xx2 - 4, lpy - 3);
+    });
+    // Y_mid target line + reticle
+    const [, mpy] = w2px(0, Y_MID);
+    ctx.strokeStyle = '#4ade80';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 3]);
+    const [xx1] = w2px(-0.8, 0), [xx2] = w2px(0.35, 0);
+    ctx.beginPath();
+    ctx.moveTo(xx1, mpy); ctx.lineTo(xx2, mpy);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    const [bcx] = w2px(BELL_X, 0);
+    ctx.strokeStyle = '#4ade80';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(bcx, mpy, 7, 0, 2 * Math.PI);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(bcx - 11, mpy); ctx.lineTo(bcx - 5, mpy);
+    ctx.moveTo(bcx + 5, mpy); ctx.lineTo(bcx + 11, mpy);
+    ctx.moveTo(bcx, mpy - 11); ctx.lineTo(bcx, mpy - 5);
+    ctx.moveTo(bcx, mpy + 5); ctx.lineTo(bcx, mpy + 11);
+    ctx.stroke();
+    ctx.fillStyle = '#4ade80';
+    ctx.font = '600 10px ui-monospace, monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText('Y_mid (aim target)', bcx + 14, mpy - 3);
+  }
+
+  // ─── Current bell ───
+  drawBell(yBell, {scale: bellScale, dx: bellShake});
+
+  // ─── Predicted bell at t+τ (ghost) during compute / load / wait ───
+  if (ph === 'load' || ph === 'compute' || ph === 'wait') {
+    const yPred = bellY(simTime + TAU);
+    drawBell(yPred, {alpha: 0.30, scale: 0.85});
+    const [gx, gpy] = w2px(BELL_X, yPred);
+    ctx.fillStyle = 'rgba(196,181,253,0.95)';
+    ctx.font = '600 10px ui-monospace, monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText('bell @ t+τ', gx + 24, gpy + 4);
+  }
+
+  // ─── Rover + leveling platform + camera + launcher ───
+  drawRoverChassis();
+  drawLevelingPlatform();
+  drawCameraMast();
+  drawLauncher(currentAimRad());
+
+  // ─── Aim line (after aim committed) ───
+  if (ph !== 'calib' && ph !== 'aim') {
+    const [tipPx, tipPy] = w2px(...aimedTip);
+    const [tgtPx, tgtPy] = w2px(BELL_X, Y_MID);
+    ctx.strokeStyle = 'rgba(124,92,255,0.55)';
+    ctx.lineWidth = 1.2;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(tipPx, tipPy); ctx.lineTo(tgtPx, tgtPy);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // ─── Bell velocity arrow ───
+  if (ph === 'track' || ph === 'load' || ph === 'compute' || ph === 'wait') {
+    const vy = bellV(simTime);
+    const [vx, vpy] = w2px(BELL_X, yBell);
+    const arrowPx = Math.max(12, Math.min(46, Math.abs(vy) * 56));
+    const dir = vy > 0 ? -1 : 1;
+    ctx.strokeStyle = '#fbbf24';
+    ctx.fillStyle = '#fbbf24';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(vx + 24, vpy);
+    ctx.lineTo(vx + 24, vpy + dir * arrowPx);
+    ctx.stroke();
+    const ay = vpy + dir * arrowPx;
+    ctx.beginPath();
+    ctx.moveTo(vx + 24, ay);
+    ctx.lineTo(vx + 24 - 4, ay - dir * 6);
+    ctx.lineTo(vx + 24 + 4, ay - dir * 6);
+    ctx.closePath();
+    ctx.fill();
+    ctx.font = '10px ui-monospace, monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText('v=' + vy.toFixed(2) + ' m/s', vx + 34, vpy + dir * arrowPx / 2);
+  }
+
+  // ─── Ball ───
+  if (ph === 'flight') {
+    const f = s.inFlight / TAU;
+    const [bx0, by0] = aimedTip;
+    const [pxA, pyA] = w2px(bx0, by0);
+    const [pxB, pyB] = w2px(BELL_X, Y_MID);
+    const px = pxA + (pxB - pxA) * f;
+    const py = pyA + (pyB - pyA) * f;
+    // trail
+    ctx.strokeStyle = 'rgba(251,191,36,0.45)';
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    ctx.moveTo(pxA, pyA); ctx.lineTo(px, py);
+    ctx.stroke();
+    // ball
+    ctx.fillStyle = '#fbbf24';
+    ctx.strokeStyle = '#fde68a';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(px, py, 5, 0, 2 * Math.PI);
+    ctx.fill(); ctx.stroke();
+  }
+
+  // ─── HIT flash ───
+  if (ph === 'hit') {
+    const t = s.inHit;
+    const alpha = (1 - t / HIT_DURATION) * 0.85;
+    const [bx, by] = w2px(BELL_X, yBell);
+    const ringR = 12 + 60 * t;
+    ctx.strokeStyle = 'rgba(251,191,36,' + alpha.toFixed(3) + ')';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(bx + bellShake, by, ringR, 0, 2 * Math.PI);
+    ctx.stroke();
+    if (t > 0.15) {
+      const a2 = (1 - (t - 0.15) / (HIT_DURATION - 0.15)) * 0.65;
+      ctx.strokeStyle = 'rgba(74,222,128,' + a2.toFixed(3) + ')';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(bx + bellShake, by, 12 + 60 * (t - 0.15), 0, 2 * Math.PI);
+      ctx.stroke();
+    }
+    const txtA = Math.min(1, t * 4);
+    ctx.fillStyle = 'rgba(251,191,36,' + txtA.toFixed(3) + ')';
+    ctx.font = '700 20px ui-monospace, monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('✸ HIT', bx, by - 50);
+    ctx.font = '600 11px ui-monospace, monospace';
+    ctx.fillStyle = 'rgba(74,222,128,' + (txtA * 0.9).toFixed(3) + ')';
+    ctx.fillText('struck at Y_mid', bx, by - 32);
+  }
+
+  // ─── Calibration scope overlay ───
+  if (ph === 'calib') drawCalibScope();
+
+  // ─── Headline label ───
+  drawHeadline(s);
+}
+
+function drawHeadline(s) {
+  const W = cv.width;
+  let label = '', color = '#94a3b8';
+  switch (s.phase) {
+    case 'calib': {
+      const pct = Math.min(100, Math.round(s.tIn / CALIB_DURATION * 100));
+      label = 'CALIBRATING — measure Y_min / Y_max (' + pct + '%)';
+      color = '#c4b5fd';
+      break;
+    }
+    case 'aim':
+      label = 'AIM — leveling platform → Y_mid';
+      color = '#7c5cff';
+      break;
+    case 'track':
+      label = 'TRACKING — bell velocity, τ = ' + TAU.toFixed(3) + 's';
+      color = '#4ade80';
+      break;
+    case 'load':
+      label = '▶ LOAD command received';
+      color = '#fb923c';
+      break;
+    case 'compute':
+      label = 'COMPUTING fire window…  τ = ' + TAU.toFixed(3) + 's';
+      color = '#fb923c';
+      break;
+    case 'wait':
+      label = 'WAITING for fire window — fire in ' + s.tWait.toFixed(2) + 's';
+      color = '#fbbf24';
+      break;
+    case 'flight':
+      label = '◆ FIRE — ball in flight';
+      color = '#fbbf24';
+      break;
+    case 'hit':
+      label = '✸ HIT — ball struck bell at Y_mid';
+      color = '#4ade80';
+      break;
+    case 'done':
+      label = '✓ strike complete';
+      color = '#4ade80';
+      break;
+  }
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, 0, W, 24);
+  ctx.fillStyle = color;
+  ctx.font = '600 13px ui-monospace, monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(label, W / 2, 16);
+}
+
+// ─────────── Sim tick ───────────
+function tickSim(dt) {
+  simTime += dt;
+  if (simTime <= CALIB_DURATION) {
+    const yb = bellY(simTime);
+    if (yb < calibYMin) calibYMin = yb;
+    if (yb > calibYMax) calibYMax = yb;
+    trail.push({t: simTime, y: yb});
+    if (trail.length > 260) trail.shift();
+  }
+  // Compute fire time at end of COMPUTE phase
+  const sNow = step();
+  if (tFire === null && (sNow.phase === 'wait' ||
+      (sNow.phase === 'compute' && sNow.tIn > COMPUTE_DURATION - 0.05))) {
+    const tEndCompute =
+        CALIB_DURATION + AIM_DURATION + TRACK_DURATION + LOAD_DURATION + COMPUTE_DURATION;
+    // pick first Y_mid crossing far enough in the future that t_fire > tEndCompute
+    let tCandidate = tEndCompute;
+    for (let safety = 0; safety < 6; safety++) {
+      const tCross = nextYMidCrossing(tCandidate);
+      if (tCross === null) break;
+      const tFireCand = tCross - TAU;
+      if (tFireCand > tEndCompute + 0.02) { tFire = tFireCand; break; }
+      tCandidate = tCross + 1e-3;
+    }
+  }
+}
+
+// ─────────── Status line ───────────
+function updateStatus() {
+  const s = step();
+  const sd = (n, d = 2) => n.toFixed(d);
+  let m = '';
+  switch (s.phase) {
+    case 'calib':
+      m = `phase=CALIB  t=${sd(simTime)}s  v_now=${sd(bellV(simTime))} m/s  ` +
+          `Y_min=${calibYMin===999?'—':sd(calibYMin)}m  ` +
+          `Y_max=${calibYMax===-999?'—':sd(calibYMax)}m`;
+      break;
+    case 'aim': {
+      const aimDeg = currentAimRad() * 180 / Math.PI;
+      m = `phase=AIM   launcher tilt → ${sd(aimDeg, 1)}°  (Y_mid=${sd(Y_MID)}m)`;
+      break;
+    }
+    case 'track':
+      m = `phase=TRACK  v_bell=${sd(bellV(simTime))} m/s   τ=${sd(TAU, 3)}s`;
+      break;
+    case 'load':
+      m = `phase=LOAD   command issued`;
+      break;
+    case 'compute':
+      m = `phase=COMPUTE  τ=${sd(TAU, 3)}s   solving for next Y_mid crossing`;
+      break;
+    case 'wait':
+      m = `phase=WAIT   fire in ${sd(s.tWait)}s   ` +
+          `bell@t+τ=${sd(bellY(simTime + TAU))}m  ` +
+          `(actual=${sd(bellY(simTime))}m)`;
+      break;
+    case 'flight':
+      m = `phase=FLIGHT  ${sd(s.inFlight, 3)}/${sd(TAU, 3)}s   ` +
+          `bell=${sd(bellY(simTime))}m`;
+      break;
+    case 'hit':
+      m = `phase=HIT   struck at Y_mid=${sd(Y_MID)}m`;
+      break;
+    case 'done':
+      m = `phase=DONE  cycle complete`;
+      break;
+  }
+  document.getElementById('status').textContent = m;
+}
+
+// ─────────── Reset / loop ───────────
+function reset() {
+  simTime = 0; lastMs = 0;
+  trail = [];
+  calibYMin = +999; calibYMax = -999;
+  tFire = null; computeReady = false;
+  buildBellSchedule();
+}
+
+function loop(nowMs) {
+  if (recording) { lastMs = 0; requestAnimationFrame(loop); return; }
+  const dtMs = lastMs === 0 ? 16 : Math.min(60, nowMs - lastMs);
+  lastMs = nowMs;
+  tickSim(dtMs / 1000);
+  draw();
+  updateStatus();
+  if (step().phase === 'cycle-end') reset();
+  requestAnimationFrame(loop);
+}
+
+document.getElementById('reset').addEventListener('click', reset);
+
+// ─────────── GIF capture ───────────
+const GIF_FPS = 15;
+const GIF_WORKER_URL = 'https://cdn.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.worker.js';
+const gifStatus = document.getElementById('gif-status');
+const gifBtn = document.getElementById('save-gif');
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function fetchWorkerBlobUrl() {
+  const res = await fetch(GIF_WORKER_URL);
+  if (!res.ok) throw new Error('worker fetch ' + res.status);
+  const code = await res.text();
+  return URL.createObjectURL(new Blob([code], {type: 'application/javascript'}));
+}
+
+function renderGif(gif) {
+  return new Promise((resolve, reject) => {
+    gif.on('progress', p => {
+      gifStatus.textContent = 'encoding… ' + Math.round(p * 100) + '%';
+    });
+    gif.on('finished', blob => resolve(blob));
+    gif.on('abort', () => reject(new Error('aborted')));
+    gif.render();
+  });
+}
+
+async function saveGif() {
+  if (recording) return;
+  if (typeof GIF === 'undefined') {
+    gifStatus.textContent = '✗ gif.js not loaded (need internet)';
+    return;
+  }
+  recording = true;
+  gifBtn.disabled = true;
+  gifStatus.textContent = 'preparing…';
+
+  let workerUrl;
+  try { workerUrl = await fetchWorkerBlobUrl(); }
+  catch (e) {
+    gifStatus.textContent = '✗ ' + e.message;
+    recording = false; gifBtn.disabled = false; return;
+  }
+
+  const gif = new GIF({
+    workers: 2, workerScript: workerUrl, quality: 10,
+    width: cv.width, height: cv.height,
+  });
+
+  reset();
+  const dt = 1 / GIF_FPS;
+  let frame = 0;
+  const safetyMax = 22.0;
+  while (simTime < safetyMax) {
+    tickSim(dt);
+    draw();
+    gif.addFrame(cv, {copy: true, delay: 1000 / GIF_FPS});
+    frame++;
+    if (frame % 5 === 0) {
+      gifStatus.textContent = 'capturing… ' + frame + ' frames (t=' + simTime.toFixed(1) + 's)';
+      await new Promise(r => setTimeout(r, 0));
+    }
+    if (step().phase === 'cycle-end') break;
+  }
+
+  try {
+    const blob = await renderGif(gif);
+    downloadBlob(blob, 'phase2_aiming.gif');
+    gifStatus.textContent = '✓ saved phase2_aiming.gif (' + frame + ' frames)';
+  } catch (e) {
+    gifStatus.textContent = '✗ encode failed: ' + e.message;
+  } finally {
+    URL.revokeObjectURL(workerUrl);
+    recording = false; gifBtn.disabled = false; reset();
+  }
+}
+
+gifBtn.addEventListener('click', saveGif);
+
+// boot
+reset();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

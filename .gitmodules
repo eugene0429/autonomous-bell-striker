@@ -1,0 +1,6 @@
+[submodule "perception/librealsense"]
+	path = perception/librealsense
+	url = https://github.com/IntelRealSense/librealsense.git
+[submodule "perception/Pangolin"]
+	path = perception/Pangolin
+	url = https://github.com/stevenlovegrove/Pangolin.git

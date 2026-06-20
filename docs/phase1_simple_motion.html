@@ -1,0 +1,608 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>Phase 1 Driving — Side View + Top-Down</title>
+<style>
+  * { box-sizing: border-box; }
+  body { background: #0f1220; color: #e6e8f2;
+    font-family: -apple-system, "SF Pro Text", "Pretendard", system-ui, sans-serif;
+    margin: 0; padding: 24px; }
+  h1 { font-size: 18px; margin: 0 0 4px 0; font-weight: 600; }
+  .sub { font-size: 12px; color: #8a91b4; margin: 0 0 20px 0; }
+  h2 { font-size: 11px; color: #8a91b4; margin: 0 0 10px 0;
+    text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600; }
+  .row { display: flex; gap: 20px; flex-wrap: wrap; }
+  .panel { background: #161a2e; border: 1px solid #2a3055; border-radius: 10px;
+    padding: 16px; flex: 1 1 480px; min-width: 0; }
+  canvas { display: block; background: #050714; border-radius: 6px;
+    border: 1px solid #2a3055; width: 100%; height: auto; }
+  .status { margin-top: 12px; font-family: "SF Mono", ui-monospace, monospace;
+    font-size: 12px; color: #94a3b8; }
+  .controls { display: flex; gap: 10px; align-items: center;
+    margin-top: 18px; flex-wrap: wrap; }
+  button { background: #1d2240; color: #e6e8f2; border: 1px solid #2a3055;
+    border-radius: 6px; padding: 8px 16px; font-size: 13px; cursor: pointer;
+    font-family: inherit; }
+  button:hover { border-color: #7c5cff; background: #262b50; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .gif-status { font-family: "SF Mono", ui-monospace, monospace;
+    font-size: 12px; color: #94a3b8; }
+</style>
+</head>
+<body>
+
+<h1>Phase 1 Visual-Servo Driving</h1>
+<p class="sub">Side view — camera tilt rises 0° → ~90° tracking the bell, then stops · Top-down — wobbles from disturbance but arrives directly below the bell</p>
+
+<div class="row">
+  <div class="panel">
+    <h2>Side View</h2>
+    <canvas id="side" width="520" height="320"></canvas>
+    <div class="status" id="status-side">idle</div>
+  </div>
+  <div class="panel">
+    <h2>Top-Down View</h2>
+    <canvas id="top" width="520" height="320"></canvas>
+    <div class="status" id="status-top">idle</div>
+  </div>
+</div>
+
+<div class="controls">
+  <button id="reset">↺ Replay</button>
+  <button id="save-gif">⬇ Download both as GIF</button>
+  <span id="gif-status" class="gif-status"></span>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.js"></script>
+<script>
+// ─────────── World constants ───────────
+const BELL_X = 3.0;       // bell forward position [m]
+const BELL_Y = 0;         // bell lateral position (top-down)
+const BELL_H = 2.0;       // bell height [m]
+const CAM_H = 0.5;        // camera mount height [m]
+const STOP_X = 2.95;      // stop position directly below bell [m]
+
+// ─────────── Timing ───────────
+const SWEEP_DURATION = 1.5;          // bootstrap tilt sweep [s]
+const SWEEP_END_DEG = 26.6;          // tilt that aims at bell from X_r=0
+const DETECT_PAUSE = 0.9;            // dramatic pause when bell is detected [s]
+const APPROACH_DURATION = 6.0;       // driving [s]
+const HOLD_DURATION = 1.5;           // hold after arrival [s]
+const TOTAL = SWEEP_DURATION + DETECT_PAUSE + APPROACH_DURATION + HOLD_DURATION;
+
+// ─────────── Disturbance ───────────
+const WOBBLE_AMP = 0.06;             // lateral wobble amplitude [m]
+const WOBBLE_FREQ = 0.55;            // [Hz]
+
+// ─────────── State ───────────
+let simTime = 0;
+let lastMs = 0;
+let trail = [];
+
+const sideCv = document.getElementById('side');
+const sideCtx = sideCv.getContext('2d');
+const topCv = document.getElementById('top');
+const topCtx = topCv.getContext('2d');
+
+function aimAngleDeg(rx) {
+  const dx = BELL_X - rx;
+  const dy = BELL_H - CAM_H;
+  return Math.atan2(dy, Math.max(0.005, dx)) * 180 / Math.PI;
+}
+
+function step() {
+  // Phase A: sweep
+  if (simTime < SWEEP_DURATION) {
+    const u = simTime / SWEEP_DURATION;
+    return {
+      phase: 'sweep',
+      rx: 0, ry: 0,
+      tiltDeg: u * SWEEP_END_DEG,
+      eventT: 0,
+    };
+  }
+  // Phase B: detection pause (lock-on event)
+  const tAfterSweep = simTime - SWEEP_DURATION;
+  if (tAfterSweep < DETECT_PAUSE) {
+    return {
+      phase: 'detected',
+      rx: 0, ry: 0,
+      tiltDeg: SWEEP_END_DEG,
+      eventT: tAfterSweep,            // 0 → DETECT_PAUSE
+    };
+  }
+  // Phase C: approach
+  const tA = tAfterSweep - DETECT_PAUSE;
+  if (tA < APPROACH_DURATION) {
+    const u = tA / APPROACH_DURATION;
+    const eased = 1 - Math.pow(1 - u, 2);           // ease-out
+    const rx = eased * STOP_X;
+    // disturbance: damped lateral wobble (visual servo aligns over time)
+    const damping = (1 - eased) * (1 - eased);
+    const ry = WOBBLE_AMP * damping
+             * Math.sin(2 * Math.PI * WOBBLE_FREQ * tA);
+    return { phase: 'approach', rx, ry, tiltDeg: aimAngleDeg(rx), eventT: 0 };
+  }
+  // Phase D: done
+  return { phase: 'done', rx: STOP_X, ry: 0, tiltDeg: aimAngleDeg(STOP_X), eventT: 0 };
+}
+
+// ─────────── Side view ───────────
+function w2pxSide(x, y) {
+  const W = sideCv.width, H = sideCv.height;
+  const margin = 28;
+  const sx = (W - 2 * margin) / 4.3;       // world x: -0.3 ~ 4.0
+  const sy = (H - margin - 26) / 2.4;      // world y: 0 ~ 2.4
+  return [margin + (x + 0.3) * sx, H - margin - y * sy];
+}
+
+function roundedRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+function drawSide(s) {
+  const W = sideCv.width, H = sideCv.height;
+  sideCtx.clearRect(0, 0, W, H);
+
+  // ceiling band
+  sideCtx.fillStyle = '#0a1224';
+  sideCtx.fillRect(0, 0, W, 14);
+
+  // floor line
+  const [fx1, fy] = w2pxSide(-0.3, 0);
+  const [fx2] = w2pxSide(4.0, 0);
+  sideCtx.strokeStyle = 'rgba(230,232,242,0.35)';
+  sideCtx.lineWidth = 1.5;
+  sideCtx.beginPath();
+  sideCtx.moveTo(fx1, fy); sideCtx.lineTo(fx2, fy);
+  sideCtx.stroke();
+  // floor hatching
+  sideCtx.strokeStyle = 'rgba(230,232,242,0.1)';
+  sideCtx.lineWidth = 1;
+  for (let x = -0.3; x <= 4.0; x += 0.2) {
+    const [px, py] = w2pxSide(x, 0);
+    sideCtx.beginPath();
+    sideCtx.moveTo(px, py); sideCtx.lineTo(px - 5, py + 6);
+    sideCtx.stroke();
+  }
+
+  // bell cable
+  const [bx, by] = w2pxSide(BELL_X, BELL_H);
+  sideCtx.strokeStyle = 'rgba(230,232,242,0.3)';
+  sideCtx.lineWidth = 1.2;
+  sideCtx.beginPath();
+  sideCtx.moveTo(bx, 14); sideCtx.lineTo(bx, by - 12);
+  sideCtx.stroke();
+
+  // bell (trapezoid)
+  sideCtx.fillStyle = '#fbbf24';
+  sideCtx.strokeStyle = '#92590a';
+  sideCtx.lineWidth = 1.5;
+  sideCtx.beginPath();
+  sideCtx.moveTo(bx - 16, by + 10);
+  sideCtx.lineTo(bx - 11, by - 12);
+  sideCtx.lineTo(bx + 11, by - 12);
+  sideCtx.lineTo(bx + 16, by + 10);
+  sideCtx.closePath();
+  sideCtx.fill(); sideCtx.stroke();
+  // bell crown
+  sideCtx.beginPath();
+  sideCtx.arc(bx, by - 14, 3, 0, 2 * Math.PI);
+  sideCtx.fill(); sideCtx.stroke();
+  // bell clapper
+  sideCtx.fillStyle = '#92590a';
+  sideCtx.beginPath();
+  sideCtx.arc(bx, by + 8, 3, 0, 2 * Math.PI); sideCtx.fill();
+  // label
+  sideCtx.fillStyle = 'rgba(251,191,36,0.95)';
+  sideCtx.font = '11px ui-monospace, monospace';
+  sideCtx.textAlign = 'center';
+  sideCtx.fillText('bell (h=' + BELL_H.toFixed(1) + 'm)', bx, by + 30);
+
+  // detection lock-on (phase B)
+  if (s.phase === 'detected') {
+    const t = s.eventT / DETECT_PAUSE;     // 0 → 1
+    // expanding pulse ring
+    const ringR = 18 + 50 * t;
+    const ringAlpha = (1 - t) * 0.9;
+    sideCtx.strokeStyle = 'rgba(74,222,128,' + ringAlpha.toFixed(3) + ')';
+    sideCtx.lineWidth = 3;
+    sideCtx.beginPath();
+    sideCtx.arc(bx, by, ringR, 0, 2 * Math.PI);
+    sideCtx.stroke();
+    // second ring slightly delayed
+    const t2 = Math.max(0, t - 0.25);
+    if (t2 > 0) {
+      const ringR2 = 18 + 50 * t2;
+      const ringAlpha2 = (1 - t2 / 0.75) * 0.7;
+      sideCtx.strokeStyle = 'rgba(74,222,128,' + ringAlpha2.toFixed(3) + ')';
+      sideCtx.lineWidth = 2;
+      sideCtx.beginPath();
+      sideCtx.arc(bx, by, ringR2, 0, 2 * Math.PI);
+      sideCtx.stroke();
+    }
+    // lock-on corner brackets
+    const bracketR = 24;
+    const bracketLen = 9;
+    sideCtx.strokeStyle = '#4ade80';
+    sideCtx.lineWidth = 2.5;
+    sideCtx.lineCap = 'round';
+    [[-1,-1],[1,-1],[-1,1],[1,1]].forEach(([sx, sy]) => {
+      sideCtx.beginPath();
+      sideCtx.moveTo(bx + sx*bracketR, by + sy*bracketR - sy*bracketLen);
+      sideCtx.lineTo(bx + sx*bracketR, by + sy*bracketR);
+      sideCtx.lineTo(bx + sx*bracketR - sx*bracketLen, by + sy*bracketR);
+      sideCtx.stroke();
+    });
+    sideCtx.lineCap = 'butt';
+    // TARGET ACQUIRED text (fade in then hold)
+    const txtAlpha = Math.min(1, t * 3);
+    sideCtx.fillStyle = 'rgba(74,222,128,' + txtAlpha.toFixed(3) + ')';
+    sideCtx.font = '600 13px ui-monospace, monospace';
+    sideCtx.textAlign = 'center';
+    sideCtx.fillText('▶ TARGET ACQUIRED', bx, by - bracketR - 14);
+  }
+
+  // robot body
+  const [rx, ry_] = w2pxSide(s.rx, 0);
+  const rbw = 36, rbh = 22;
+  sideCtx.fillStyle = '#1d2240';
+  sideCtx.strokeStyle = '#7c5cff';
+  sideCtx.lineWidth = 2;
+  roundedRect(sideCtx, rx - rbw/2, ry_ - rbh - 6, rbw, rbh, 4);
+  sideCtx.fill(); sideCtx.stroke();
+  // wheels
+  sideCtx.fillStyle = '#0a1224';
+  sideCtx.strokeStyle = '#94a3b8';
+  sideCtx.lineWidth = 1.2;
+  [-11, 11].forEach(dx => {
+    sideCtx.beginPath();
+    sideCtx.arc(rx + dx, ry_ - 3, 5, 0, 2 * Math.PI);
+    sideCtx.fill(); sideCtx.stroke();
+  });
+
+  // camera mast (vertical)
+  const [, mastTop] = w2pxSide(s.rx, CAM_H);
+  sideCtx.strokeStyle = '#94a3b8';
+  sideCtx.lineWidth = 2.5;
+  sideCtx.beginPath();
+  sideCtx.moveTo(rx, ry_ - rbh - 6);
+  sideCtx.lineTo(rx, mastTop);
+  sideCtx.stroke();
+
+  // camera (rotated by tilt)
+  sideCtx.save();
+  sideCtx.translate(rx, mastTop);
+  sideCtx.rotate(-s.tiltDeg * Math.PI / 180);
+  // camera body
+  sideCtx.fillStyle = '#4ade80';
+  sideCtx.strokeStyle = '#166534';
+  sideCtx.lineWidth = 1.5;
+  roundedRect(sideCtx, -4, -7, 22, 14, 2);
+  sideCtx.fill(); sideCtx.stroke();
+  // lens
+  sideCtx.fillStyle = '#0a1224';
+  sideCtx.beginPath();
+  sideCtx.arc(16, 0, 3.5, 0, 2 * Math.PI); sideCtx.fill();
+  sideCtx.strokeStyle = 'rgba(74,222,128,0.6)';
+  sideCtx.lineWidth = 1;
+  sideCtx.stroke();
+  // FOV dashed line
+  sideCtx.strokeStyle = 'rgba(74,222,128,0.45)';
+  sideCtx.lineWidth = 1.4;
+  sideCtx.setLineDash([4, 4]);
+  sideCtx.beginPath();
+  sideCtx.moveTo(20, 0); sideCtx.lineTo(180, 0);
+  sideCtx.stroke();
+  sideCtx.setLineDash([]);
+  sideCtx.restore();
+
+  // tilt label
+  sideCtx.fillStyle = 'rgba(74,222,128,0.95)';
+  sideCtx.font = '600 12px ui-monospace, monospace';
+  sideCtx.textAlign = 'left';
+  sideCtx.fillText('tilt = ' + s.tiltDeg.toFixed(1) + '°',
+                   rx + 24, ry_ - rbh - 14);
+
+  // horizontal distance to bell
+  const [bxFloor] = w2pxSide(BELL_X, 0);
+  sideCtx.strokeStyle = 'rgba(124,92,255,0.4)';
+  sideCtx.lineWidth = 1;
+  sideCtx.setLineDash([3, 3]);
+  sideCtx.beginPath();
+  sideCtx.moveTo(rx, ry_ + 4);
+  sideCtx.lineTo(bxFloor, ry_ + 4);
+  sideCtx.stroke();
+  sideCtx.setLineDash([]);
+  const dHoriz = Math.max(0, BELL_X - s.rx);
+  sideCtx.fillStyle = 'rgba(124,92,255,0.95)';
+  sideCtx.font = '11px ui-monospace, monospace';
+  sideCtx.textAlign = 'center';
+  sideCtx.fillText('horiz dist ' + dHoriz.toFixed(2) + 'm',
+                   (rx + bxFloor) / 2, ry_ + 16);
+}
+
+// ─────────── Top-down view ───────────
+function w2pxTop(x, y) {
+  const W = topCv.width, H = topCv.height;
+  const margin = 28;
+  const sx = (W - 2 * margin) / 4.3;
+  const sy = (H - 2 * margin) / 0.8;
+  return [margin + (x + 0.3) * sx, H / 2 - y * sy];
+}
+
+function drawTop(s) {
+  const W = topCv.width, H = topCv.height;
+  topCtx.clearRect(0, 0, W, H);
+
+  // grid
+  topCtx.strokeStyle = 'rgba(255,255,255,0.05)';
+  topCtx.lineWidth = 1;
+  for (let gx = 0; gx <= 4.0; gx += 0.5) {
+    const [px] = w2pxTop(gx, 0);
+    topCtx.beginPath(); topCtx.moveTo(px, 14); topCtx.lineTo(px, H - 14); topCtx.stroke();
+  }
+  for (let gy = -0.4; gy <= 0.4; gy += 0.2) {
+    const [, py] = w2pxTop(0, gy);
+    topCtx.beginPath(); topCtx.moveTo(14, py); topCtx.lineTo(W - 14, py); topCtx.stroke();
+  }
+  // center line (y=0)
+  topCtx.strokeStyle = 'rgba(255,255,255,0.12)';
+  topCtx.setLineDash([5, 5]);
+  const [, midY] = w2pxTop(0, 0);
+  topCtx.beginPath(); topCtx.moveTo(14, midY); topCtx.lineTo(W - 14, midY); topCtx.stroke();
+  topCtx.setLineDash([]);
+
+  // bell
+  const [bx, by] = w2pxTop(BELL_X, BELL_Y);
+  topCtx.fillStyle = 'rgba(251,191,36,0.95)';
+  topCtx.beginPath();
+  topCtx.arc(bx, by, 11, 0, 2 * Math.PI);
+  topCtx.fill();
+  topCtx.strokeStyle = 'rgba(251,191,36,0.35)';
+  topCtx.lineWidth = 2;
+  topCtx.beginPath();
+  topCtx.arc(bx, by, 18, 0, 2 * Math.PI);
+  topCtx.stroke();
+  topCtx.fillStyle = 'rgba(230,232,242,0.7)';
+  topCtx.font = '11px ui-monospace, monospace';
+  topCtx.textAlign = 'left';
+  topCtx.fillText('bell', bx + 24, by + 4);
+
+  // detection lock-on (phase B) — pulse rings on bell from above
+  if (s.phase === 'detected') {
+    const t = s.eventT / DETECT_PAUSE;
+    const ringR = 14 + 60 * t;
+    const ringAlpha = (1 - t) * 0.85;
+    topCtx.strokeStyle = 'rgba(74,222,128,' + ringAlpha.toFixed(3) + ')';
+    topCtx.lineWidth = 3;
+    topCtx.beginPath();
+    topCtx.arc(bx, by, ringR, 0, 2 * Math.PI);
+    topCtx.stroke();
+    const t2 = Math.max(0, t - 0.3);
+    if (t2 > 0) {
+      const ringR2 = 14 + 60 * t2;
+      const ringAlpha2 = (1 - t2 / 0.7) * 0.6;
+      topCtx.strokeStyle = 'rgba(74,222,128,' + ringAlpha2.toFixed(3) + ')';
+      topCtx.lineWidth = 2;
+      topCtx.beginPath();
+      topCtx.arc(bx, by, ringR2, 0, 2 * Math.PI);
+      topCtx.stroke();
+    }
+    // crosshair lines
+    const txtAlpha = Math.min(1, t * 3);
+    topCtx.strokeStyle = 'rgba(74,222,128,' + (txtAlpha * 0.8).toFixed(3) + ')';
+    topCtx.lineWidth = 1.5;
+    topCtx.setLineDash([3, 3]);
+    topCtx.beginPath();
+    topCtx.moveTo(bx - 35, by); topCtx.lineTo(bx + 35, by);
+    topCtx.moveTo(bx, by - 35); topCtx.lineTo(bx, by + 35);
+    topCtx.stroke();
+    topCtx.setLineDash([]);
+    // label
+    topCtx.fillStyle = 'rgba(74,222,128,' + txtAlpha.toFixed(3) + ')';
+    topCtx.font = '600 12px ui-monospace, monospace';
+    topCtx.textAlign = 'center';
+    topCtx.fillText('LOCKED', bx, by - 42);
+  }
+
+  // trail
+  topCtx.strokeStyle = 'rgba(124,92,255,0.45)';
+  topCtx.lineWidth = 1.5;
+  topCtx.beginPath();
+  for (let i = 0; i < trail.length; i++) {
+    const [px, py] = w2pxTop(trail[i].x, trail[i].y);
+    if (i === 0) topCtx.moveTo(px, py);
+    else topCtx.lineTo(px, py);
+  }
+  topCtx.stroke();
+
+  // robot
+  const [rx, ry_] = w2pxTop(s.rx, s.ry);
+  topCtx.fillStyle = '#7c5cff';
+  topCtx.strokeStyle = '#c4b5fd';
+  topCtx.lineWidth = 2;
+  roundedRect(topCtx, rx - 12, ry_ - 8, 22, 16, 3);
+  topCtx.fill(); topCtx.stroke();
+  // heading arrow
+  topCtx.fillStyle = '#c4b5fd';
+  topCtx.beginPath();
+  topCtx.moveTo(rx + 10, ry_ - 4);
+  topCtx.lineTo(rx + 17, ry_);
+  topCtx.lineTo(rx + 10, ry_ + 4);
+  topCtx.closePath();
+  topCtx.fill();
+
+  // distance/disturbance label
+  const dist = Math.sqrt((BELL_X - s.rx) ** 2 + (BELL_Y - s.ry) ** 2);
+  topCtx.fillStyle = 'rgba(124,92,255,0.95)';
+  topCtx.font = '600 11px ui-monospace, monospace';
+  topCtx.textAlign = 'left';
+  topCtx.fillText('dist = ' + dist.toFixed(2) + 'm  ry = '
+                  + (s.ry * 100).toFixed(1) + 'cm',
+                  rx + 22, ry_ - 12);
+}
+
+// ─────────── Loop ───────────
+function loop(nowMs) {
+  if (recording) { lastMs = 0; requestAnimationFrame(loop); return; }
+  const dtMs = lastMs === 0 ? 16 : Math.min(50, nowMs - lastMs);
+  lastMs = nowMs;
+  simTime += dtMs / 1000;
+  const s = step();
+
+  if (s.phase === 'approach') {
+    trail.push({ x: s.rx, y: s.ry });
+    if (trail.length > 300) trail.shift();
+  }
+
+  drawSide(s);
+  drawTop(s);
+
+  const phaseLabel = {
+    sweep: 'Bootstrap (tilt sweep — searching for bell)',
+    detected: '▶ TARGET ACQUIRED — locked on bell',
+    approach: 'Driving + visual servo (horiz dist ↓ → tilt ↑)',
+    done: '✓ Arrived — stopped directly below bell'
+  }[s.phase];
+  document.getElementById('status-side').textContent =
+    phaseLabel + '   ·   t=' + simTime.toFixed(2) + 's   tilt=' + s.tiltDeg.toFixed(1) + '°';
+  document.getElementById('status-top').textContent =
+    'rx=' + s.rx.toFixed(2) + 'm   ry=' + (s.ry * 100).toFixed(1) + 'cm (disturbance)';
+
+  // pause briefly at the end, then auto-reset
+  if (simTime > TOTAL + 1.5) reset();
+  requestAnimationFrame(loop);
+}
+
+function reset() {
+  simTime = 0;
+  trail = [];
+  lastMs = 0;
+}
+
+document.getElementById('reset').addEventListener('click', reset);
+
+// ─────────── GIF capture ───────────
+const GIF_FPS = 15;
+const GIF_WORKER_URL = 'https://cdn.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.worker.js';
+let recording = false;
+const gifStatus = document.getElementById('gif-status');
+const gifBtn = document.getElementById('save-gif');
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function fetchWorkerBlobUrl() {
+  // jsdelivr serves with CORS, so file:// can fetch and Blob-URL it
+  const res = await fetch(GIF_WORKER_URL);
+  if (!res.ok) throw new Error('worker fetch failed: ' + res.status);
+  const code = await res.text();
+  return URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
+}
+
+function renderGif(gif, label) {
+  return new Promise((resolve, reject) => {
+    gif.on('progress', p => {
+      gifStatus.textContent = label + ' encoding… ' + Math.round(p * 100) + '%';
+    });
+    gif.on('finished', blob => resolve(blob));
+    gif.on('abort', () => reject(new Error('aborted')));
+    gif.render();
+  });
+}
+
+async function saveGifs() {
+  if (recording) return;
+  if (typeof GIF === 'undefined') {
+    gifStatus.textContent = '✗ gif.js not loaded (need internet)';
+    return;
+  }
+  recording = true;
+  gifBtn.disabled = true;
+  gifStatus.textContent = 'preparing…';
+
+  let workerUrl;
+  try {
+    workerUrl = await fetchWorkerBlobUrl();
+  } catch (e) {
+    gifStatus.textContent = '✗ ' + e.message;
+    recording = false;
+    gifBtn.disabled = false;
+    return;
+  }
+
+  const sideGif = new GIF({
+    workers: 2, workerScript: workerUrl, quality: 10,
+    width: sideCv.width, height: sideCv.height,
+  });
+  const topGif = new GIF({
+    workers: 2, workerScript: workerUrl, quality: 10,
+    width: topCv.width, height: topCv.height,
+  });
+
+  // 1) capture: run a complete cycle at fixed dt = 1/FPS
+  reset();
+  const dt = 1 / GIF_FPS;
+  const cycleEnd = TOTAL + 1.0;
+  const totalFrames = Math.ceil(cycleEnd / dt);
+  let frame = 0;
+  while (simTime < cycleEnd) {
+    simTime += dt;
+    const s = step();
+    if (s.phase === 'approach') {
+      trail.push({ x: s.rx, y: s.ry });
+      if (trail.length > 300) trail.shift();
+    }
+    drawSide(s);
+    drawTop(s);
+    sideGif.addFrame(sideCv, { copy: true, delay: 1000 / GIF_FPS });
+    topGif.addFrame(topCv, { copy: true, delay: 1000 / GIF_FPS });
+    frame++;
+    if (frame % 5 === 0) {
+      gifStatus.textContent = 'capturing… ' + frame + '/' + totalFrames + ' frames';
+      await new Promise(r => setTimeout(r, 0));     // yield UI
+    }
+  }
+
+  // 2) encode + download — sequential so progress is readable
+  try {
+    const sideBlob = await renderGif(sideGif, 'side');
+    downloadBlob(sideBlob, 'phase1_side.gif');
+    const topBlob = await renderGif(topGif, 'top');
+    downloadBlob(topBlob, 'phase1_top.gif');
+    gifStatus.textContent = '✓ saved phase1_side.gif + phase1_top.gif';
+  } catch (e) {
+    gifStatus.textContent = '✗ encode failed: ' + e.message;
+  } finally {
+    URL.revokeObjectURL(workerUrl);
+    recording = false;
+    gifBtn.disabled = false;
+    reset();
+  }
+}
+
+gifBtn.addEventListener('click', saveGifs);
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

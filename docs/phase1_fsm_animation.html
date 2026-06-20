@@ -1,0 +1,901 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>Phase 1 시각 기반 주행 — FSM 애니메이션</title>
+<style>
+  :root {
+    --bg: #0f1220;
+    --panel: #161a2e;
+    --panel-2: #1d2240;
+    --line: #2a3055;
+    --text: #e6e8f2;
+    --muted: #8a91b4;
+    --accent: #7c5cff;
+    --track: #4ade80;
+    --coast: #fbbf24;
+    --hold:  #fb923c;
+    --search:#ef4444;
+    --done:  #3b82f6;
+    --fail:  #6b7280;
+    --boot:  #94a3b8;
+    --boot-active: #c4b5fd;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "SF Pro Text", "Pretendard", system-ui, sans-serif; }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  h2 { font-size: 12px; margin: 0 0 8px 0; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 24px; background: var(--panel);
+    border-bottom: 1px solid var(--line);
+  }
+  .controls { display: flex; gap: 8px; align-items: center; }
+  .controls button, .controls select {
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px;
+    padding: 6px 12px; font-size: 13px; cursor: pointer;
+    font-family: inherit;
+  }
+  .controls button:hover { background: #262b50; border-color: var(--accent); }
+  .controls button:active { transform: translateY(1px); }
+  main {
+    display: grid; grid-template-columns: 1fr 360px; gap: 16px;
+    padding: 16px 24px;
+  }
+  .panel { background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 16px; }
+  .right { display: grid; grid-template-rows: auto auto; gap: 16px; }
+  canvas { display: block; background: #050714; border-radius: 6px;
+    border: 1px solid var(--line); }
+  footer {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 16px;
+    padding: 12px 24px; background: var(--panel);
+    border-top: 1px solid var(--line);
+    font-family: "SF Mono", "JetBrains Mono", ui-monospace, monospace;
+    font-size: 13px;
+  }
+  footer .cell { display: flex; flex-direction: column; gap: 4px; }
+  footer .label { color: var(--muted); font-size: 11px; text-transform: uppercase;
+    letter-spacing: 0.06em; }
+  .bar { width: 100%; height: 6px; background: var(--panel-2); border-radius: 3px;
+    overflow: hidden; }
+  .bar > div { height: 100%; background: var(--accent); border-radius: 3px;
+    transition: width 0.1s linear; }
+
+  /* FSM SVG */
+  #fsm { width: 100%; height: auto; display: block; }
+  .node rect { stroke: var(--line); stroke-width: 1.5; fill: var(--panel-2); }
+  .node text { fill: var(--text); font-size: 13px; font-weight: 600;
+    text-anchor: middle; dominant-baseline: middle;
+    font-family: "SF Mono", ui-monospace, monospace; }
+  .node.boot rect { fill: #1a2238; }
+  .node.boot text { fill: var(--boot); }
+  .node.active.boot rect { fill: #312763; stroke: var(--boot-active); stroke-width: 2.5;
+    filter: drop-shadow(0 0 6px var(--boot-active)); }
+  .node.active.boot text { fill: var(--boot-active); }
+  .node.track rect { stroke: #1d4d2a; }
+  .node.track text { fill: var(--track); }
+  .node.active.track rect { fill: #0d2a18; stroke: var(--track); stroke-width: 2.5;
+    filter: drop-shadow(0 0 8px var(--track)); }
+  .node.coast text { fill: var(--coast); }
+  .node.active.coast rect { fill: #2b210a; stroke: var(--coast); stroke-width: 2.5;
+    filter: drop-shadow(0 0 8px var(--coast)); }
+  .node.hold text { fill: var(--hold); }
+  .node.active.hold rect { fill: #2a1c0d; stroke: var(--hold); stroke-width: 2.5;
+    filter: drop-shadow(0 0 8px var(--hold)); }
+  .node.search text { fill: var(--search); }
+  .node.active.search rect { fill: #2c0f10; stroke: var(--search); stroke-width: 2.5;
+    filter: drop-shadow(0 0 8px var(--search)); }
+  .node.done text { fill: var(--done); }
+  .node.active.done rect { fill: #0e1a37; stroke: var(--done); stroke-width: 2.5;
+    filter: drop-shadow(0 0 8px var(--done)); }
+  .node.fail text { fill: var(--fail); }
+  .node.active.fail rect { fill: #1a1c22; stroke: var(--fail); stroke-width: 2.5;
+    filter: drop-shadow(0 0 8px var(--fail)); }
+
+  .edge { stroke: var(--line); stroke-width: 1.5; fill: none;
+    marker-end: url(#arrow); }
+  .edge.active { stroke: var(--accent); stroke-width: 2.5;
+    marker-end: url(#arrow-active); }
+  .edge-label { font-size: 10px; fill: var(--muted); text-anchor: middle;
+    font-family: "SF Mono", ui-monospace, monospace; }
+  .edge.active + .edge-label { fill: var(--accent); font-weight: 600; }
+
+  .legend { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 12px;
+    font-size: 11px; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 4px;
+    font-family: "SF Mono", ui-monospace, monospace; }
+  .legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Phase 1 시각 기반 주행 — FSM 상태 전이 애니메이션</h1>
+  <div class="controls">
+    <select id="scenario">
+      <option value="full">전체 데모 (부트스트랩 + 모든 전이)</option>
+      <option value="fail">실패 시나리오 (SEARCH → FAIL)</option>
+    </select>
+    <button id="btn-play">▶ 재생</button>
+    <button id="btn-pause">⏸ 일시정지</button>
+    <button id="btn-step">⏭ 1 프레임</button>
+    <button id="btn-reset">↺ 리셋</button>
+  </div>
+</header>
+
+<main>
+  <div class="panel">
+    <h2>FSM 상태 다이어그램</h2>
+    <svg id="fsm" viewBox="0 0 820 460">
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5"
+                markerUnits="strokeWidth" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M0,0 L10,5 L0,10 z" fill="#2a3055"/>
+        </marker>
+        <marker id="arrow-active" viewBox="0 0 10 10" refX="9" refY="5"
+                markerUnits="strokeWidth" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M0,0 L10,5 L0,10 z" fill="#7c5cff"/>
+        </marker>
+      </defs>
+
+      <!-- bootstrap row label -->
+      <text x="20" y="32" fill="#8a91b4" font-size="11"
+            font-family="SF Mono, ui-monospace, monospace"
+            letter-spacing="0.08em">BOOTSTRAP</text>
+      <text x="20" y="232" fill="#8a91b4" font-size="11"
+            font-family="SF Mono, ui-monospace, monospace"
+            letter-spacing="0.08em">MAIN FSM</text>
+
+      <!-- Bootstrap nodes -->
+      <g class="node boot" id="n-zero">
+        <rect x="80"  y="60" width="120" height="48" rx="8"/>
+        <text x="140" y="84">ZERO_TILT</text>
+      </g>
+      <g class="node boot" id="n-sweep">
+        <rect x="240" y="60" width="120" height="48" rx="8"/>
+        <text x="300" y="84">TILT_SWEEP</text>
+      </g>
+      <g class="node boot" id="n-creep">
+        <rect x="400" y="60" width="120" height="48" rx="8"/>
+        <text x="460" y="84">CREEP</text>
+      </g>
+
+      <!-- Main FSM nodes -->
+      <g class="node track" id="n-track">
+        <rect x="80"  y="248" width="120" height="56" rx="10"/>
+        <text x="140" y="276">TRACK</text>
+      </g>
+      <g class="node coast" id="n-coast">
+        <rect x="240" y="248" width="120" height="56" rx="10"/>
+        <text x="300" y="276">COAST</text>
+      </g>
+      <g class="node hold" id="n-hold">
+        <rect x="400" y="248" width="120" height="56" rx="10"/>
+        <text x="460" y="276">HOLD</text>
+      </g>
+      <g class="node search" id="n-search">
+        <rect x="560" y="248" width="120" height="56" rx="10"/>
+        <text x="620" y="276">SEARCH</text>
+      </g>
+      <g class="node done" id="n-done">
+        <rect x="80"  y="380" width="120" height="48" rx="10"/>
+        <text x="140" y="404">DONE</text>
+      </g>
+      <g class="node fail" id="n-fail">
+        <rect x="700" y="380" width="100" height="48" rx="10"/>
+        <text x="750" y="404">FAIL</text>
+      </g>
+
+      <!-- Bootstrap edges -->
+      <path class="edge" id="e-zero-sweep"
+            d="M200,84 L240,84"/>
+      <path class="edge" id="e-sweep-creep"
+            d="M360,76 C380,76 380,76 400,76"/>
+      <text class="edge-label" x="380" y="68">no detect</text>
+      <path class="edge" id="e-creep-sweep"
+            d="M400,92 C380,92 380,92 360,92"/>
+      <text class="edge-label" x="380" y="106">retry</text>
+      <path class="edge" id="e-sweep-track"
+            d="M280,108 C280,150 140,180 140,248"/>
+      <text class="edge-label" x="240" y="180">found</text>
+
+      <!-- TRACK ⇄ COAST -->
+      <path class="edge" id="e-track-coast"
+            d="M200,268 L240,268"/>
+      <text class="edge-label" x="220" y="260">detect lost</text>
+      <path class="edge" id="e-coast-track"
+            d="M240,288 L200,288"/>
+      <text class="edge-label" x="220" y="304">found</text>
+
+      <!-- COAST → HOLD -->
+      <path class="edge" id="e-coast-hold"
+            d="M360,268 L400,268"/>
+      <text class="edge-label" x="380" y="260">lost ≥ 3</text>
+      <!-- HOLD → TRACK (curved up & over) -->
+      <path class="edge" id="e-hold-track"
+            d="M460,248 C460,200 200,200 145,248"/>
+      <text class="edge-label" x="320" y="212">found</text>
+
+      <!-- HOLD → SEARCH -->
+      <path class="edge" id="e-hold-search"
+            d="M520,268 L560,268"/>
+      <text class="edge-label" x="540" y="260">lost ≥ 15</text>
+      <!-- SEARCH → TRACK (curved big arc up) -->
+      <path class="edge" id="e-search-track"
+            d="M620,248 C620,180 200,170 145,248"/>
+      <text class="edge-label" x="430" y="180">found</text>
+
+      <!-- SEARCH → FAIL -->
+      <path class="edge" id="e-search-fail"
+            d="M650,304 C660,340 720,340 740,380"/>
+      <text class="edge-label" x="720" y="340">SEARCH &gt; 30s</text>
+
+      <!-- TRACK → DONE -->
+      <path class="edge" id="e-track-done"
+            d="M140,304 L140,380"/>
+      <text class="edge-label" x="195" y="345">stop cond × 4</text>
+    </svg>
+
+    <div class="legend">
+      <span><i style="background:var(--track)"></i>TRACK — 검출 있음, PID로 조향+틸트+전진</span>
+      <span><i style="background:var(--coast)"></i>COAST — 잠깐 잃음 (&lt;3 프레임), 이전 명령 70%</span>
+      <span><i style="background:var(--hold)"></i>HOLD — 잃음 누적 (3~15), 정지</span>
+      <span><i style="background:var(--search)"></i>SEARCH — 오래 잃음 (≥15), 마지막 방향 회전</span>
+      <span><i style="background:var(--done)"></i>DONE — 종 바로 아래 도착</span>
+      <span><i style="background:var(--fail)"></i>FAIL — SEARCH 30초 초과</span>
+    </div>
+  </div>
+
+  <div class="right">
+    <div class="panel">
+      <h2>📷 카메라 뷰 (640×480 → 320×240)</h2>
+      <canvas id="cam" width="320" height="240"></canvas>
+    </div>
+    <div class="panel">
+      <h2>🛰 탑다운 뷰 (로버 + 종)</h2>
+      <canvas id="top" width="320" height="240"></canvas>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <div class="cell">
+    <span class="label">state</span>
+    <span id="f-state" style="font-weight:600;color:var(--track)">—</span>
+  </div>
+  <div class="cell">
+    <span class="label">lost_frames</span>
+    <div class="bar"><div id="bar-lost" style="width:0%;background:var(--hold)"></div></div>
+    <span id="f-lost">0 / 15</span>
+  </div>
+  <div class="cell">
+    <span class="label">stop_streak</span>
+    <div class="bar"><div id="bar-stop" style="width:0%;background:var(--done)"></div></div>
+    <span id="f-stop">0 / 4</span>
+  </div>
+  <div class="cell">
+    <span class="label">tilt</span>
+    <span id="f-tilt">0.0°</span>
+  </div>
+  <div class="cell">
+    <span class="label">horiz_dist</span>
+    <span id="f-horiz">— m</span>
+  </div>
+  <div class="cell">
+    <span class="label">t (sim)</span>
+    <span id="f-time">0.00s</span>
+  </div>
+</footer>
+
+<script>
+// ───────────────────────────── 상수 (실제 코드 매칭) ─────────────────────────────
+const DT = 0.067;                         // 15Hz
+const IMG_W = 640, IMG_H = 480;
+const COAST_LOST = 3;
+const HOLD_LOST = 15;
+const SEARCH_TIMEOUT_S = 30.0;
+const COAST_SCALE = 0.7;                  // (시각화용으로만 사용)
+const STOP_DEBOUNCE = 4;
+const D_STOP_M = 0.15;
+const TILT_STOP_LO = 85, TILT_STOP_HI = 95;
+// 시각화용으로 controller default(v_max=0.3) 사용. 실제 run_phase1 에서는 0.1.
+const V_MAX = 0.30;
+const OMEGA_MAX = 0.60;
+const KP_TILT = 0.05;                     // deg / px
+const KP_H = 0.003;                       // (rad/s) / px
+const KP_V = 0.5;                         // (m/s) / m
+const TILT_MIN = 0, TILT_MAX = 95;
+const HORIZ_LPF_ALPHA = 0.2;
+const TILT_DEADBAND_PX = 8;
+
+// 카메라/지오메트리
+const CAM_HFOV_DEG = 69.0;                // D435i HFOV
+const CAM_VFOV_DEG = 42.0;                // D435i VFOV
+const CAM_HEIGHT_M = 0.35;                // 로버 위 카메라 높이
+const BELL_POS = { x: 3.0, y: 0.25, z: 1.95 };   // (x: 전방, y: 횡, z: 높이)
+const BELL_RADIUS_M = 0.08;
+
+// 시뮬레이션 박스
+const WORLD_W = 4.0, WORLD_H = 2.0;       // 탑다운 시각화 영역
+
+// ───────────────────────────── 시나리오 ─────────────────────────────
+const SCENARIOS = {
+  full: {
+    bootstrap: {
+      zeroTiltDuration: 0.3,
+      sweepStart: 0, sweepEnd: 90, sweepStep: 5,
+      sweepDwell: 0.10,                    // 각 step 시간
+      foundAtDeg: 30,                      // 30°에서 종 발견 → TRACK 진입
+    },
+    blackouts: [
+      { t0: 2.5, t1: 2.62 },               // ~2 프레임 → COAST 만
+      { t0: 4.0, t1: 4.55 },               // ~8 프레임 → COAST → HOLD
+      { t0: 5.5, t1: 7.0 },                // ~22 프레임 → COAST → HOLD → SEARCH
+    ],
+  },
+  fail: {
+    bootstrap: {
+      zeroTiltDuration: 0.3,
+      sweepStart: 0, sweepEnd: 90, sweepStep: 5,
+      sweepDwell: 0.10,
+      foundAtDeg: 30,
+    },
+    blackouts: [ { t0: 2.5, t1: 999.0 } ],
+  },
+};
+
+// ───────────────────────────── 시뮬레이션 상태 ─────────────────────────────
+let scenarioKey = "full";
+let scenario = SCENARIOS[scenarioKey];
+let playing = false;
+let lastFrameMs = 0;
+let accumMs = 0;
+let simTime = 0;
+
+// 로봇 월드 상태
+let robot = { x: 0, y: 0, theta: 0 };     // 자세
+let mastTilt = 0;                          // 카메라 틸트 (deg, 위로 양수)
+let lastTrackV = 0;                        // 마지막 TRACK 명령 (COAST 시 70% 적용)
+let lastTrackW = 0;
+
+// 컨트롤러 상태 (visual_servo_controller.py 미러)
+let ctrl = {
+  state: "BOOT",            // BOOT, TRACK, COAST, HOLD, SEARCH, DONE, FAIL
+  bootPhase: "ZERO",        // ZERO, SWEEP, CREEP
+  bootSweepDeg: 0,
+  bootSweepNextT: 0,
+  lostFrames: 0,
+  prevErrX: null,
+  integX: 0,
+  integY: 0,
+  lastErrX: 0,
+  searchElapsedS: 0,
+  horizDistFilt: null,
+  stopStreak: 0,
+};
+
+// ───────────────────────────── 유틸 ─────────────────────────────
+const clip = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+const deg2rad = d => d * Math.PI / 180;
+const rad2deg = r => r * 180 / Math.PI;
+function wrapPi(a) {
+  while (a >  Math.PI) a -= 2*Math.PI;
+  while (a < -Math.PI) a += 2*Math.PI;
+  return a;
+}
+function isBlackedOut(t) {
+  return scenario.blackouts.some(b => t >= b.t0 && t < b.t1);
+}
+
+// ───────────────────────────── 검출 모델 ─────────────────────────────
+// 로봇 자세 + 카메라 틸트에서 종의 카메라 영상 좌표 + depth 계산.
+// scenario blackout 구간에서는 null 반환.
+function getDetection(t) {
+  if (isBlackedOut(t)) return null;
+
+  const dx = BELL_POS.x - robot.x;
+  const dy = BELL_POS.y - robot.y;
+  const dz = BELL_POS.z - CAM_HEIGHT_M;
+  // 로봇 frame 으로 회전
+  const ct = Math.cos(-robot.theta), st = Math.sin(-robot.theta);
+  const fx =  dx * ct - dy * st;          // 전방 (양수면 앞)
+  const fy =  dx * st + dy * ct;          // 횡
+  if (fx <= 0.05) return null;             // 종이 뒤/너무 가까이 → 미검출
+
+  const horizD = Math.sqrt(fx*fx + fy*fy);
+  const depth3D = Math.sqrt(horizD*horizD + dz*dz);
+  // 카메라 좌표 부호: +y_world(=로봇 왼쪽) → 영상 cx < 320 (좌). 즉 u = -bearing/halfH.
+  // 그래야 errX>0(영상 우측)→omega<0(CW)→로봇 우회전 의 실제 코드 부호 관계가 성립.
+  const bearingRad = Math.atan2(fy, fx);
+  const pitchRad = Math.atan2(dz, horizD);
+
+  const tiltRad = deg2rad(mastTilt);
+  const halfH = deg2rad(CAM_HFOV_DEG / 2);
+  const halfV = deg2rad(CAM_VFOV_DEG / 2);
+  const u = -bearingRad / halfH;            // -1 (좌) ~ +1 (우)
+  const v = -(pitchRad - tiltRad) / halfV;  // 위가 음수 (이미지 y 아래)
+  if (Math.abs(u) > 1 || Math.abs(v) > 1) return null;
+
+  const cx = IMG_W/2 + u * (IMG_W/2);
+  const cy = IMG_H/2 + v * (IMG_H/2);
+
+  // 종 반지름 → 픽셀
+  const bellAngularRad = Math.atan2(BELL_RADIUS_M, depth3D);
+  const halfBoxPx = (bellAngularRad / halfH) * (IMG_W / 2);
+
+  const x1 = clip(cx - halfBoxPx, 0, IMG_W);
+  const y1 = clip(cy - halfBoxPx, 0, IMG_H);
+  const x2 = clip(cx + halfBoxPx, 0, IMG_W);
+  const y2 = clip(cy + halfBoxPx, 0, IMG_H);
+
+  return {
+    bbox: [x1, y1, x2, y2],
+    cx, cy,
+    depth_m: depth3D,
+    halfBoxPx,
+  };
+}
+
+// ───────────────────────────── 컨트롤러 (controller.py 미러) ─────────────────────────────
+function controllerStep(detection) {
+  // Lost handler
+  if (detection === null) {
+    ctrl.lostFrames += 1;
+    ctrl.stopStreak = 0;
+    if (ctrl.lostFrames < COAST_LOST) {
+      ctrl.state = "COAST";
+      // 마지막 TRACK 명령을 70% 로 유지 (시각화: 로봇이 천천히 계속 움직임)
+      return { v: lastTrackV * COAST_SCALE, omega: lastTrackW * COAST_SCALE,
+               errX: ctrl.lastErrX, horizDist: NaN };
+    }
+    if (ctrl.lostFrames < HOLD_LOST) {
+      ctrl.state = "HOLD";
+      return { v: 0, omega: 0, errX: ctrl.lastErrX, horizDist: NaN };
+    }
+    // SEARCH
+    ctrl.searchElapsedS += DT;
+    if (ctrl.searchElapsedS > SEARCH_TIMEOUT_S) {
+      ctrl.state = "FAIL";
+      return { v: 0, omega: 0, errX: ctrl.lastErrX, horizDist: NaN };
+    }
+    ctrl.state = "SEARCH";
+    const sign = ctrl.lastErrX >= 0 ? -1 : 1;
+    const w = sign * 0.6;
+    return { v: 0, omega: w, errX: ctrl.lastErrX, horizDist: NaN };
+  }
+
+  // TRACK
+  const justReacquired = ctrl.lostFrames > 0;
+  ctrl.lostFrames = 0;
+  ctrl.searchElapsedS = 0;
+  ctrl.state = "TRACK";
+
+  const errX = detection.cx - IMG_W/2;
+  const errY = detection.cy - IMG_H/2;
+  const horizRaw = detection.depth_m * Math.cos(deg2rad(mastTilt));
+  ctrl.horizDistFilt = ctrl.horizDistFilt === null
+    ? horizRaw
+    : HORIZ_LPF_ALPHA * horizRaw + (1 - HORIZ_LPF_ALPHA) * ctrl.horizDistFilt;
+
+  // tilt PI
+  const errYEff = Math.abs(errY) < TILT_DEADBAND_PX ? 0 : errY;
+  const dTilt = -KP_TILT * errYEff;
+  const tiltCmd = clip(mastTilt + dTilt, TILT_MIN, TILT_MAX);
+  mastTilt = tiltCmd;
+
+  // heading PI (no D for simplicity)
+  if (ctrl.prevErrX === null || justReacquired) ctrl.prevErrX = errX;
+  ctrl.prevErrX = errX;
+  let omega = -KP_H * errX;
+  omega = clip(omega, -OMEGA_MAX, OMEGA_MAX);
+
+  // forward velocity
+  const align = Math.max(0.2, 1.0 - Math.abs(errX) / (IMG_W/2));
+  let v = clip(KP_V * ctrl.horizDistFilt * align, 0, V_MAX);
+
+  // stop?
+  const inTiltRange = (tiltCmd >= TILT_STOP_LO && tiltCmd <= TILT_STOP_HI);
+  const close = ctrl.horizDistFilt < D_STOP_M;
+  if (inTiltRange && close) ctrl.stopStreak += 1; else ctrl.stopStreak = 0;
+  if (ctrl.stopStreak >= STOP_DEBOUNCE) {
+    ctrl.state = "DONE";
+    v = 0; omega = 0;
+  }
+
+  ctrl.lastErrX = errX;
+  lastTrackV = v;
+  lastTrackW = omega;
+  return { v, omega, errX, horizDist: ctrl.horizDistFilt };
+}
+
+// ───────────────────────────── 부트스트랩 진행 ─────────────────────────────
+function bootstrapStep() {
+  const b = scenario.bootstrap;
+  if (ctrl.bootPhase === "ZERO") {
+    // 0° 로 천천히 호밍 (시각화용)
+    const target = 0;
+    mastTilt += (target - mastTilt) * 0.3;
+    if (simTime >= b.zeroTiltDuration) {
+      ctrl.bootPhase = "SWEEP";
+      mastTilt = b.sweepStart;
+      ctrl.bootSweepDeg = b.sweepStart;
+      ctrl.bootSweepNextT = simTime + b.sweepDwell;
+    }
+    return;
+  }
+  if (ctrl.bootPhase === "SWEEP") {
+    mastTilt = ctrl.bootSweepDeg;
+    if (simTime >= ctrl.bootSweepNextT) {
+      // 이 스텝에서 검출되는지 확인 (foundAtDeg)
+      if (ctrl.bootSweepDeg >= b.foundAtDeg) {
+        ctrl.state = "TRACK";
+        ctrl.bootPhase = "DONE";
+        return;
+      }
+      ctrl.bootSweepDeg += b.sweepStep;
+      ctrl.bootSweepNextT = simTime + b.sweepDwell;
+      if (ctrl.bootSweepDeg > b.sweepEnd) {
+        // sweep 실패 → CREEP (이 데모에서는 발생 안 함)
+        ctrl.bootPhase = "CREEP";
+      }
+    }
+    return;
+  }
+  if (ctrl.bootPhase === "CREEP") {
+    robot.x += 0.15 * DT;
+    // 1초 creep 후 다시 sweep
+    if ((simTime - ctrl.bootSweepNextT) > 1.0) {
+      ctrl.bootPhase = "SWEEP";
+      ctrl.bootSweepDeg = b.sweepStart;
+      ctrl.bootSweepNextT = simTime + b.sweepDwell;
+      mastTilt = b.sweepStart;
+    }
+  }
+}
+
+// ───────────────────────────── 메인 tick ─────────────────────────────
+function tick() {
+  simTime += DT;
+
+  if (ctrl.state === "BOOT") {
+    bootstrapStep();
+    if (ctrl.state === "BOOT") {
+      updateUI({ v: 0, omega: 0, errX: 0, horizDist: NaN });
+      return;
+    }
+  }
+
+  if (ctrl.state === "DONE" || ctrl.state === "FAIL") {
+    updateUI({ v: 0, omega: 0, errX: ctrl.lastErrX, horizDist: ctrl.horizDistFilt ?? NaN });
+    return;
+  }
+
+  // 검출
+  const det = getDetection(simTime);
+  const out = controllerStep(det);
+
+  // 로봇 자세 업데이트 (단순 diff-drive)
+  // ω→theta, v→position
+  robot.theta += out.omega * DT;
+  robot.theta = wrapPi(robot.theta);
+  robot.x += out.v * Math.cos(robot.theta) * DT;
+  robot.y += out.v * Math.sin(robot.theta) * DT;
+
+  updateUI(out);
+}
+
+// ───────────────────────────── UI 업데이트 ─────────────────────────────
+const stateColors = {
+  BOOT: "var(--boot-active)", TRACK: "var(--track)", COAST: "var(--coast)",
+  HOLD: "var(--hold)", SEARCH: "var(--search)", DONE: "var(--done)", FAIL: "var(--fail)",
+};
+const stateLabels = {
+  BOOT_ZERO: "ZERO_TILT", BOOT_SWEEP: "TILT_SWEEP", BOOT_CREEP: "CREEP",
+  TRACK: "TRACK", COAST: "COAST", HOLD: "HOLD", SEARCH: "SEARCH",
+  DONE: "DONE", FAIL: "FAIL",
+};
+
+function activeNodeId() {
+  if (ctrl.state === "BOOT") {
+    if (ctrl.bootPhase === "ZERO") return "n-zero";
+    if (ctrl.bootPhase === "SWEEP") return "n-sweep";
+    if (ctrl.bootPhase === "CREEP") return "n-creep";
+    return null;
+  }
+  return "n-" + ctrl.state.toLowerCase();
+}
+
+function updateUI(out) {
+  // FSM 활성 노드
+  document.querySelectorAll("#fsm .node").forEach(n => n.classList.remove("active"));
+  const activeId = activeNodeId();
+  if (activeId) document.getElementById(activeId)?.classList.add("active");
+
+  // 상태 텍스트
+  let displayState = ctrl.state;
+  if (ctrl.state === "BOOT") {
+    displayState = stateLabels["BOOT_" + ctrl.bootPhase] || "BOOT";
+  }
+  const f = id => document.getElementById(id);
+  f("f-state").textContent = displayState;
+  f("f-state").style.color = stateColors[ctrl.state === "BOOT" ? "BOOT" : ctrl.state];
+
+  // bar (lost / stop)
+  const lostPct = clip(ctrl.lostFrames / HOLD_LOST * 100, 0, 100);
+  f("bar-lost").style.width = lostPct + "%";
+  f("f-lost").textContent = ctrl.lostFrames + " / " + HOLD_LOST;
+  if (ctrl.lostFrames < COAST_LOST) f("bar-lost").style.background = "var(--coast)";
+  else if (ctrl.lostFrames < HOLD_LOST) f("bar-lost").style.background = "var(--hold)";
+  else f("bar-lost").style.background = "var(--search)";
+
+  const stopPct = clip(ctrl.stopStreak / STOP_DEBOUNCE * 100, 0, 100);
+  f("bar-stop").style.width = stopPct + "%";
+  f("f-stop").textContent = ctrl.stopStreak + " / " + STOP_DEBOUNCE;
+
+  f("f-tilt").textContent = mastTilt.toFixed(1) + "°";
+  f("f-horiz").textContent = isFinite(out.horizDist)
+    ? out.horizDist.toFixed(2) + " m" : "— m";
+  f("f-time").textContent = simTime.toFixed(2) + "s";
+
+  drawCamera(out);
+  drawTopdown();
+}
+
+// ───────────────────────────── Canvas: 카메라 뷰 ─────────────────────────────
+const cam = document.getElementById("cam");
+const camCtx = cam.getContext("2d");
+function drawStateBadge(ctx, w) {
+  // 큰 상태 배지 (좌상단)
+  const label = ctrl.state === "BOOT"
+    ? (stateLabels["BOOT_" + ctrl.bootPhase] || "BOOT")
+    : ctrl.state;
+  const colors = {
+    BOOT: "#c4b5fd", TRACK: "#4ade80", COAST: "#fbbf24",
+    HOLD: "#fb923c", SEARCH: "#ef4444", DONE: "#3b82f6", FAIL: "#6b7280",
+  };
+  const c = colors[ctrl.state] || "#e6e8f2";
+  ctx.fillStyle = "rgba(0,0,0,0.55)";
+  ctx.fillRect(0, 0, w, 22);
+  ctx.fillStyle = c;
+  ctx.font = "600 12px ui-monospace, monospace";
+  ctx.textAlign = "left";
+  ctx.fillText("● " + label, 8, 15);
+  ctx.fillStyle = "rgba(230,232,242,0.75)";
+  ctx.font = "11px ui-monospace, monospace";
+  ctx.textAlign = "right";
+  ctx.fillText("t=" + simTime.toFixed(2) + "s  tilt=" + mastTilt.toFixed(0) + "°",
+               w - 8, 15);
+}
+
+function drawCamera() {
+  const w = cam.width, h = cam.height;
+  // background — 검출 잃었을 때 회색 처리
+  const det = (ctrl.state === "TRACK" || ctrl.state === "DONE")
+    ? getDetection(simTime) : null;
+  const lost = (ctrl.state === "COAST" || ctrl.state === "HOLD"
+                || ctrl.state === "SEARCH" || ctrl.state === "FAIL");
+  if (lost) {
+    camCtx.fillStyle = "#1a1c2a";
+    camCtx.fillRect(0, 0, w, h);
+    // 잡음 텍스처
+    for (let i = 0; i < 120; i++) {
+      camCtx.fillStyle = "rgba(60,65,90,0.4)";
+      camCtx.fillRect(Math.random()*w, Math.random()*h, 2, 2);
+    }
+    camCtx.fillStyle = "rgba(239,68,68,0.85)";
+    camCtx.font = "600 22px ui-monospace, monospace";
+    camCtx.textAlign = "center";
+    camCtx.fillText("✗ LOST", w/2, h/2);
+    camCtx.font = "11px ui-monospace, monospace";
+    camCtx.fillStyle = "rgba(230,232,242,0.6)";
+    camCtx.fillText("lost_frames = " + ctrl.lostFrames, w/2, h/2 + 22);
+    drawStateBadge(camCtx, w);
+    return;
+  }
+
+  // sky/ground background
+  const grad = camCtx.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, "#0a1224");
+  grad.addColorStop(0.6, "#15203a");
+  grad.addColorStop(1, "#1f1c2a");
+  camCtx.fillStyle = grad;
+  camCtx.fillRect(0, 0, w, h);
+
+  // 중앙 크로스헤어
+  camCtx.strokeStyle = "rgba(230,232,242,0.18)";
+  camCtx.lineWidth = 1;
+  camCtx.beginPath();
+  camCtx.moveTo(w/2, 0); camCtx.lineTo(w/2, h);
+  camCtx.moveTo(0, h/2); camCtx.lineTo(w, h/2);
+  camCtx.stroke();
+
+  // bootstrap sweep 중에는 검출이 sweep 결과 시점 전까지 막혀있음 → 종 미표시
+  if (ctrl.state === "BOOT") {
+    // sweep 진행 표시: 화면 중앙에 큰 mast 각도 + 진행 막대
+    camCtx.fillStyle = "rgba(196,181,253,0.7)";
+    camCtx.font = "600 32px ui-monospace, monospace";
+    camCtx.textAlign = "center";
+    camCtx.fillText("⟲ " + mastTilt.toFixed(0) + "°", w/2, h/2);
+    camCtx.font = "11px ui-monospace, monospace";
+    camCtx.fillStyle = "rgba(230,232,242,0.55)";
+    camCtx.fillText("부트스트랩: 종 탐색 중", w/2, h/2 + 22);
+    // sweep 진행도 막대
+    const swProg = ctrl.bootPhase === "SWEEP"
+      ? clip((mastTilt - 0) / 90, 0, 1) : 0;
+    camCtx.fillStyle = "rgba(124,92,255,0.25)";
+    camCtx.fillRect(40, h - 20, w - 80, 6);
+    camCtx.fillStyle = "rgba(196,181,253,0.85)";
+    camCtx.fillRect(40, h - 20, (w - 80) * swProg, 6);
+    drawStateBadge(camCtx, w);
+    return;
+  }
+
+  if (det) {
+    // 640x480 → 320x240 으로 스케일
+    const sx = w / IMG_W, sy = h / IMG_H;
+    const [x1, y1, x2, y2] = det.bbox;
+    // 종 자체 (어둑한 원)
+    camCtx.fillStyle = "rgba(251,191,36,0.55)";
+    camCtx.beginPath();
+    camCtx.arc((det.cx)*sx, (det.cy)*sy, det.halfBoxPx*sx*0.85, 0, 2*Math.PI);
+    camCtx.fill();
+    // bbox
+    camCtx.strokeStyle = "rgba(74,222,128,0.95)";
+    camCtx.lineWidth = 2;
+    camCtx.strokeRect(x1*sx, y1*sy, (x2-x1)*sx, (y2-y1)*sy);
+    // cx 점
+    camCtx.fillStyle = "rgba(74,222,128,1)";
+    camCtx.beginPath();
+    camCtx.arc(det.cx*sx, det.cy*sy, 3, 0, 2*Math.PI);
+    camCtx.fill();
+    // 라벨
+    camCtx.fillStyle = "rgba(74,222,128,0.95)";
+    camCtx.font = "10px ui-monospace, monospace";
+    camCtx.textAlign = "left";
+    camCtx.fillText("bell  d=" + det.depth_m.toFixed(2) + "m",
+                    x1*sx, Math.max(12, y1*sy - 4));
+  }
+  drawStateBadge(camCtx, w);
+}
+
+// ───────────────────────────── Canvas: 탑다운 ─────────────────────────────
+const top = document.getElementById("top");
+const topCtx = top.getContext("2d");
+function world2px(x, y, w, h) {
+  // 월드: 0 ≤ x ≤ WORLD_W (전방, 위→오른쪽), -WORLD_H/2 ≤ y ≤ WORLD_H/2
+  // 화면: x_world → 가로, y_world → 세로
+  const margin = 20;
+  const usableW = w - 2*margin, usableH = h - 2*margin;
+  const px = margin + (x / WORLD_W) * usableW;
+  const py = h/2 - (y / (WORLD_H/2)) * (usableH/2);
+  return [px, py];
+}
+function drawTopdown() {
+  const w = top.width, h = top.height;
+  topCtx.fillStyle = "#080a18";
+  topCtx.fillRect(0, 0, w, h);
+  // grid
+  topCtx.strokeStyle = "rgba(255,255,255,0.05)";
+  topCtx.lineWidth = 1;
+  for (let gx = 0; gx <= WORLD_W; gx += 0.5) {
+    const [px] = world2px(gx, 0, w, h);
+    topCtx.beginPath(); topCtx.moveTo(px, 0); topCtx.lineTo(px, h); topCtx.stroke();
+  }
+  for (let gy = -WORLD_H/2; gy <= WORLD_H/2; gy += 0.5) {
+    const [, py] = world2px(0, gy, w, h);
+    topCtx.beginPath(); topCtx.moveTo(0, py); topCtx.lineTo(w, py); topCtx.stroke();
+  }
+  // 종
+  const [bx, by] = world2px(BELL_POS.x, BELL_POS.y, w, h);
+  topCtx.fillStyle = "rgba(251,191,36,0.95)";
+  topCtx.beginPath();
+  topCtx.arc(bx, by, 9, 0, 2*Math.PI); topCtx.fill();
+  topCtx.strokeStyle = "rgba(251,191,36,0.4)";
+  topCtx.lineWidth = 2;
+  topCtx.beginPath();
+  topCtx.arc(bx, by, 14, 0, 2*Math.PI); topCtx.stroke();
+  topCtx.fillStyle = "rgba(230,232,242,0.7)";
+  topCtx.font = "10px ui-monospace, monospace";
+  topCtx.textAlign = "left";
+  topCtx.fillText("bell", bx + 18, by + 4);
+
+  // 카메라 FOV 부채꼴
+  const [rx, ry] = world2px(robot.x, robot.y, w, h);
+  const fovHalf = deg2rad(CAM_HFOV_DEG / 2);
+  const fovLen = 60;
+  topCtx.fillStyle = "rgba(124,92,255,0.10)";
+  topCtx.strokeStyle = "rgba(124,92,255,0.45)";
+  topCtx.lineWidth = 1;
+  topCtx.beginPath();
+  topCtx.moveTo(rx, ry);
+  const a1 = -robot.theta - fovHalf, a2 = -robot.theta + fovHalf;
+  topCtx.lineTo(rx + Math.cos(a1) * fovLen, ry + Math.sin(a1) * fovLen);
+  topCtx.lineTo(rx + Math.cos(a2) * fovLen, ry + Math.sin(a2) * fovLen);
+  topCtx.closePath();
+  topCtx.fill();
+  topCtx.stroke();
+
+  // 로봇 (heading 방향 삼각형)
+  const rh = -robot.theta;        // 화면 y 반전
+  topCtx.fillStyle = stateColors[ctrl.state] === "var(--track)" ? "#4ade80"
+    : ctrl.state === "BOOT" ? "#c4b5fd"
+    : ctrl.state === "COAST" ? "#fbbf24"
+    : ctrl.state === "HOLD" ? "#fb923c"
+    : ctrl.state === "SEARCH" ? "#ef4444"
+    : ctrl.state === "DONE" ? "#3b82f6"
+    : ctrl.state === "FAIL" ? "#6b7280" : "#4ade80";
+  const sz = 9;
+  topCtx.beginPath();
+  topCtx.moveTo(rx + Math.cos(rh) * sz,         ry + Math.sin(rh) * sz);
+  topCtx.lineTo(rx + Math.cos(rh + 2.5) * sz,   ry + Math.sin(rh + 2.5) * sz);
+  topCtx.lineTo(rx + Math.cos(rh - 2.5) * sz,   ry + Math.sin(rh - 2.5) * sz);
+  topCtx.closePath();
+  topCtx.fill();
+
+  // 카메라 틸트 표시
+  topCtx.fillStyle = "rgba(230,232,242,0.6)";
+  topCtx.font = "10px ui-monospace, monospace";
+  topCtx.textAlign = "left";
+  topCtx.fillText("robot  θ=" + rad2deg(robot.theta).toFixed(0)
+                  + "°  tilt=" + mastTilt.toFixed(0) + "°",
+                  rx + 14, ry - 8);
+}
+
+// ───────────────────────────── 루프 ─────────────────────────────
+function loop(nowMs) {
+  if (!playing) { lastFrameMs = nowMs; requestAnimationFrame(loop); return; }
+  const dtMs = Math.min(200, nowMs - lastFrameMs);
+  lastFrameMs = nowMs;
+  accumMs += dtMs;
+  const tickMs = DT * 1000;
+  while (accumMs >= tickMs) {
+    tick();
+    accumMs -= tickMs;
+  }
+  requestAnimationFrame(loop);
+}
+
+// ───────────────────────────── 컨트롤 ─────────────────────────────
+function resetSim() {
+  scenario = SCENARIOS[scenarioKey];
+  playing = false;
+  simTime = 0; accumMs = 0;
+  robot = { x: 0, y: 0, theta: 0 };
+  mastTilt = 0;
+  lastTrackV = 0; lastTrackW = 0;
+  ctrl = {
+    state: "BOOT", bootPhase: "ZERO",
+    bootSweepDeg: 0, bootSweepNextT: 0,
+    lostFrames: 0, prevErrX: null,
+    integX: 0, integY: 0, lastErrX: 0,
+    searchElapsedS: 0, horizDistFilt: null, stopStreak: 0,
+  };
+  updateUI({ v: 0, omega: 0, errX: 0, horizDist: NaN });
+}
+
+document.getElementById("btn-play").addEventListener("click", () => {
+  if (ctrl.state === "DONE" || ctrl.state === "FAIL") resetSim();
+  playing = true;
+});
+document.getElementById("btn-pause").addEventListener("click", () => { playing = false; });
+document.getElementById("btn-step").addEventListener("click", () => {
+  playing = false; tick();
+});
+document.getElementById("btn-reset").addEventListener("click", resetSim);
+document.getElementById("scenario").addEventListener("change", (e) => {
+  scenarioKey = e.target.value;
+  resetSim();
+});
+
+resetSim();
+requestAnimationFrame(loop);
+</script>
+
+</body>
+</html>

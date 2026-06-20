@@ -1,0 +1,14 @@
+opencv-python>=4.8.0
+numpy>=1.24.0
+scipy>=1.10.0
+ultralytics>=8.0.0
+Pillow>=10.0.0
+albumentations>=1.4.0
+pyrealsense2>=2.50.0
+
+# Note: albumentations pulls in opencv-python-headless, which clobbers the
+# GUI build of opencv-python and breaks visualize_dataset.py. After running
+# `pip install -r requirements.txt`, run:
+#     pip uninstall -y opencv-python-headless
+#     pip install --force-reinstall --no-deps opencv-python
+# to restore cv2.imshow / cv2.namedWindow.
