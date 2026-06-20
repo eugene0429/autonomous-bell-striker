@@ -5,7 +5,7 @@ Reads pose from ORB-SLAM3 in real time, runs the existing DrivingController
 to compute (ω_L, ω_R), and streams them to OpenRB-150 over the wheel-motor
 serial protocol. Stops cleanly on goal-reach, timeout, SLAM failure, or Ctrl-C.
 
-Spec: docs/superpowers/specs/2026-05-04-driving-pipeline-design.md
+Spec: docs/SW_ARCHITECTURE.md §4 (Driving pipeline)
 
 Usage
 -----
@@ -26,9 +26,9 @@ from typing import Callable, Dict, Optional, Tuple
 @dataclass
 class SafetyConfig:
     lost_quiet_sec:    float = 0.5
-    lost_warn_sec:     float = 45.0    # ORB-SLAM3 watchdog 가 한 번 respawn 할 시간
+    lost_warn_sec:     float = 45.0    # Time for the ORB-SLAM3 watchdog to respawn once
     # ABORT after lost_quiet_sec + lost_warn_sec total
-    # (localizer 가 watchdog 으로 죽었다고 신고하면 즉시 ABORT — 아래 check() 참고)
+    # (if the localizer reports it died via watchdog, ABORT immediately — see check() below)
 
     jump_factor:       float = 3.0
     jump_outlier_max:  int   = 3
@@ -65,8 +65,9 @@ class SafetySupervisor:
         c = self.cfg
         t = self._now()
 
-        # localizer 가 watchdog 한도까지 가서 죽었으면 즉시 ABORT.
-        # 회복 가능성 없는데 lost_warn_sec 동안 모터 멈춘 채 기다릴 이유 없음.
+        # If the localizer reached its watchdog limit and died, ABORT immediately.
+        # No reason to wait lost_warn_sec with motors stopped when there is no
+        # chance of recovery.
         if not localizer_alive:
             self.reason = "localizer watchdog exhausted"
             return "ABORT"
@@ -136,8 +137,8 @@ class RunArgs:
     max_wheel_omega: float = 30.0  # [rad/s] — per-wheel angular velocity clip
     archive_slam: Optional[str] = None  # preserve SLAM tmp dirs at this path on death
     orb_nfeatures: Optional[int] = 1800  # ORB-SLAM3 nFeatures. base yaml=1500.
-                                         # 2000 은 Pi5 CPU 한계로 frame queue overflow → 즉사.
-                                         # 1800 이 init 안정성과 runtime margin 의 절충점.
+                                         # 2000 hits the Pi5 CPU limit → frame queue overflow → instant death.
+                                         # 1800 is the compromise between init stability and runtime margin.
 
 
 def _log_status(t_elapsed, pose, out, log: Callable[[str], None]) -> None:
@@ -236,8 +237,8 @@ def main(argv: Optional[list] = None) -> int:
                          "death for forensic analysis. Default path: /tmp/orbslam_archive")
     ap.add_argument("--orb-nfeatures", type=int, default=1800,
                     help="ORB-SLAM3 ORBextractor.nFeatures (base yaml=1500). "
-                         "Default 1800: init 안정성 ↑ 하면서 Pi5 CPU 마진 유지. "
-                         "2000+ 은 frame queue overflow 위험.")
+                         "Default 1800: improves init stability while preserving Pi5 CPU margin. "
+                         "2000+ risks frame queue overflow.")
     ap.add_argument("--swap-lr", action="store_true",
                     help="swap L/R wheel commands before sending "
                          "(workaround for inverted firmware wiring)")

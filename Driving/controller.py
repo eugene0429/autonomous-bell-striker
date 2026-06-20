@@ -1,23 +1,23 @@
 """
 Driving Controller — production module.
 
-현재 pose (x, y, theta) + 목표 (target_x, target_y) 를 입력 받아
-좌·우 바퀴 각속도를 출력하는 차동 구동 (differential drive) 제어기.
+A differential-drive controller that takes the current pose (x, y, theta) +
+target (target_x, target_y) and outputs left/right wheel angular velocities.
 
-차량 모델
----------
+Vehicle model
+-------------
 - 2-wheel differential drive
-- 모바일 중심과 바퀴축 일치 (회전 중심 = 베이스 중심)
-- 파라미터: 바퀴 직경 (wheel_diameter), 바퀴 간격 (wheel_base)
+- Mobile center coincides with the wheel axle (rotation center = base center)
+- Parameters: wheel diameter (wheel_diameter), wheel spacing (wheel_base)
 
-제어 로직
----------
-- 거리 비례 선속도 + 감속 반경 + 헤딩 오차 클 때 감속
-- PID 각속도 (heading error 기반)
-- (옵션) SLAM confidence 낮을 때 속도/각속도 스케일 다운
+Control logic
+-------------
+- Distance-proportional linear velocity + slowdown radius + decelerate on large heading error
+- PID angular velocity (based on heading error)
+- (Optional) scale down speed/angular velocity when SLAM confidence is low
 
-사용 예
--------
+Usage example
+-------------
     from controller import DrivingController, ControllerConfig
 
     cfg = ControllerConfig(wheel_diameter=0.10, wheel_base=0.30)
@@ -44,54 +44,54 @@ import numpy as np
 # ──────────────────────────────────────────────
 @dataclass
 class ControllerConfig:
-    # ── 차량 기하 (모바일 중심 = 바퀴축 중심) ──
-    wheel_diameter: float = 0.10   # 바퀴 직경 [m]
-    wheel_base: float = 0.30       # 좌우 바퀴 간격 [m]
+    # ── Vehicle geometry (mobile center = wheel-axle center) ──
+    wheel_diameter: float = 0.10   # Wheel diameter [m]
+    wheel_base: float = 0.30       # Distance between left/right wheels [m]
 
-    # ── 속도/각속도 한계 ──
-    max_speed: float = 0.3         # 최대 선속도 [m/s]
-    max_omega: float = 1.0         # 최대 각속도 [rad/s]
-    max_wheel_omega: float = 30.0  # 바퀴 각속도 클립 [rad/s]
+    # ── Velocity/angular-velocity limits ──
+    max_speed: float = 0.3         # Maximum linear velocity [m/s]
+    max_omega: float = 1.0         # Maximum angular velocity [rad/s]
+    max_wheel_omega: float = 30.0  # Wheel angular-velocity clip [rad/s]
 
-    # ── 제어기 게인 ──
+    # ── Controller gains ──
     kp_linear: float = 0.8
-    kp_angular: float = 1.5 
+    kp_angular: float = 1.5
     ki_angular: float = 0.03
     kd_angular: float = 0
 
-    # ── 거동 형상 ──
-    slowdown_radius: float = 1.0   # 이 거리 이내부터 선속도 감속 [m]
-    goal_tolerance: float = 0.3    # 도달 판정 반경 [m]
+    # ── Motion profile ──
+    slowdown_radius: float = 1.0   # Decelerate linear velocity within this distance [m]
+    goal_tolerance: float = 0.3    # Goal-reached decision radius [m]
 
-    # ── 적분 항 anti-windup ──
+    # ── Integral-term anti-windup ──
     integral_clip: float = 2.0
 
-    # ── 제어 주기 (PID 미분/적분용) ──
-    dt: float = 0.067              # 15 Hz 기준 [s]
+    # ── Control period (for PID derivative/integral) ──
+    dt: float = 0.067              # Based on 15 Hz [s]
 
-    # ── SLAM 신뢰도 기반 감속 (옵션) ──
+    # ── SLAM-confidence-based deceleration (optional) ──
     enable_confidence_scaling: bool = True
     lowconf_threshold: float = 0.8
-    lowconf_speed_scale: float = 0.3   # confidence 0 일 때 곱해질 최소 배율
+    lowconf_speed_scale: float = 0.3   # Minimum scale applied when confidence is 0
 
 
 # ──────────────────────────────────────────────
 # Controller
 # ──────────────────────────────────────────────
 class DrivingController:
-    """현재 pose + 목표 (x, y) → 좌·우 바퀴 각속도."""
+    """Current pose + target (x, y) → left/right wheel angular velocities."""
 
     def __init__(self, cfg: ControllerConfig | None = None):
         self.cfg = cfg if cfg is not None else ControllerConfig()
         self._prev_angle_error = 0.0
         self._integral_angle_error = 0.0
 
-    # ── 상태 초기화 (페이즈 전환 시 호출) ──
+    # ── State reset (called on phase transition) ──
     def reset(self) -> None:
         self._prev_angle_error = 0.0
         self._integral_angle_error = 0.0
 
-    # ── 메인 API ──
+    # ── Main API ──
     def compute(
         self,
         x: float,
@@ -102,37 +102,37 @@ class DrivingController:
         slam_confidence: float = 1.0,
     ) -> Dict[str, float]:
         """
-        한 스텝의 제어 명령 계산.
+        Compute the control command for one step.
 
         Parameters
         ----------
-        x, y, theta       현재 pose (world frame, theta in rad)
-        target_x, target_y  목표 좌표 (world frame, m)
-        slam_confidence   0.0 ~ 1.0, 낮으면 속도 감속 (옵션)
+        x, y, theta       Current pose (world frame, theta in rad)
+        target_x, target_y  Target coordinates (world frame, m)
+        slam_confidence   0.0 ~ 1.0, decelerate when low (optional)
 
         Returns
         -------
         dict
-            v                  : 선속도 [m/s]
-            omega              : 각속도 [rad/s]
-            wheel_omega_left   : 좌 바퀴 각속도 [rad/s]
-            wheel_omega_right  : 우 바퀴 각속도 [rad/s]
-            wheel_v_left       : 좌 바퀴 접선 속도 [m/s]
-            wheel_v_right      : 우 바퀴 접선 속도 [m/s]
-            distance           : 목표까지 거리 [m]
-            angle_error        : 헤딩 오차 [rad, in (-pi, pi]]
-            reached            : 도달 여부 (distance < goal_tolerance)
+            v                  : Linear velocity [m/s]
+            omega              : Angular velocity [rad/s]
+            wheel_omega_left   : Left wheel angular velocity [rad/s]
+            wheel_omega_right  : Right wheel angular velocity [rad/s]
+            wheel_v_left       : Left wheel tangential velocity [m/s]
+            wheel_v_right      : Right wheel tangential velocity [m/s]
+            distance           : Distance to target [m]
+            angle_error        : Heading error [rad, in (-pi, pi]]
+            reached            : Whether reached (distance < goal_tolerance)
         """
         c = self.cfg
 
-        # ── 1) 거리 / 헤딩 오차 ──
+        # ── 1) Distance / heading error ──
         dx = target_x - x
         dy = target_y - y
         distance = float(np.hypot(dx, dy))
         desired_heading = float(np.arctan2(dy, dx))
         angle_error = self._wrap_angle(desired_heading - theta)
 
-        # ── 2) PID 각속도 ──
+        # ── 2) PID angular velocity ──
         self._integral_angle_error += angle_error * c.dt
         self._integral_angle_error = float(np.clip(
             self._integral_angle_error, -c.integral_clip, c.integral_clip))
@@ -144,21 +144,21 @@ class DrivingController:
                  + c.kd_angular * derivative)
         omega = float(np.clip(omega, -c.max_omega, c.max_omega))
 
-        # ── 3) 선속도 (거리 비례 + 감속 반경 + 헤딩 오차 시 감속) ──
+        # ── 3) Linear velocity (distance-proportional + slowdown radius + decelerate on heading error) ──
         speed_factor = min(1.0, distance / max(c.slowdown_radius, 1e-9))
         heading_factor = max(0.2, 1.0 - abs(angle_error) / np.pi)
         v = c.kp_linear * distance * speed_factor * heading_factor
         v = float(np.clip(v, 0.0, c.max_speed))
 
-        # ── 4) SLAM confidence 기반 감속 ──
+        # ── 4) SLAM-confidence-based deceleration ──
         if c.enable_confidence_scaling and slam_confidence < c.lowconf_threshold:
             ratio = max(0.0, slam_confidence) / max(c.lowconf_threshold, 1e-9)
             conf_scale = c.lowconf_speed_scale + (1.0 - c.lowconf_speed_scale) * ratio
             v *= conf_scale
             omega *= conf_scale
 
-        # ── 5) 차동 구동 역기구학: (v, ω) → (v_L, v_R) → (ω_L, ω_R) ──
-        # 모바일 중심 = 바퀴축 중심 가정:
+        # ── 5) Differential-drive inverse kinematics: (v, ω) → (v_L, v_R) → (ω_L, ω_R) ──
+        # Assuming mobile center = wheel-axle center:
         #   v   = (v_L + v_R) / 2
         #   ω   = (v_R - v_L) / wheel_base
         #   ⇒ v_L = v - ω·L/2,   v_R = v + ω·L/2
@@ -185,11 +185,11 @@ class DrivingController:
             "reached": distance < c.goal_tolerance,
         }
 
-    # ── 정역기구학 헬퍼 (캘리브레이션·테스트용) ──
+    # ── Forward/inverse kinematics helpers (for calibration/testing) ──
     def wheel_omegas_from_twist(
         self, v: float, omega: float
     ) -> Dict[str, float]:
-        """(v, ω) → 좌·우 바퀴 각속도 (한계 클립 없이)."""
+        """(v, ω) → left/right wheel angular velocities (without limit clipping)."""
         c = self.cfg
         r = c.wheel_diameter / 2.0
         v_left = v - omega * c.wheel_base / 2.0
@@ -202,7 +202,7 @@ class DrivingController:
     def twist_from_wheel_omegas(
         self, wheel_omega_left: float, wheel_omega_right: float
     ) -> Dict[str, float]:
-        """좌·우 바퀴 각속도 → (v, ω). 휠 odometry 등에 사용."""
+        """Left/right wheel angular velocities → (v, ω). Used for wheel odometry, etc."""
         c = self.cfg
         r = c.wheel_diameter / 2.0
         v_left = wheel_omega_left * r
@@ -211,7 +211,7 @@ class DrivingController:
         omega = (v_right - v_left) / c.wheel_base
         return {"v": v, "omega": omega}
 
-    # ── 내부 헬퍼 ──
+    # ── Internal helper ──
     @staticmethod
     def _wrap_angle(angle: float) -> float:
         return float((angle + np.pi) % (2.0 * np.pi) - np.pi)

@@ -1,7 +1,7 @@
 /*
  * Leveling Platform Controller — OpenRB-150
  *
- * Pi5 (LevelingMotorClient) 와의 시리얼 프로토콜:
+ * Serial protocol with the Pi5 (LevelingMotorClient):
  *
  *   Pi → OpenRB                    OpenRB → Pi
  *   ───────────                    ──────────
@@ -15,18 +15,18 @@
  *
  * Build env
  *   - Arduino IDE 2.x  +  OpenRB-150 board package
- *   - Library: DYNAMIXEL2Arduino (>= 0.6.0, InfoSyncWriteInst_t 지원)
+ *   - Library: DYNAMIXEL2Arduino (>= 0.6.0, InfoSyncWriteInst_t support)
  *   - Serial : USB CDC, 115200 8N1
  *
  * Wiring
- *   - OpenRB-150 의 DYNAMIXEL 포트에 모터 3개 (ID 1, 2, 3) 데이지체인.
- *   - 모터 1개당 4096 step / rev (XL330 / XM430 등).
- *   - step 0 은 각 모터의 물리적 홈 위치 (센터, raw = CENTER_RAW).
+ *   - 3 motors (ID 1, 2, 3) daisy-chained on the OpenRB-150 DYNAMIXEL port.
+ *   - 4096 step / rev per motor (XL330 / XM430, etc.).
+ *   - step 0 is each motor's physical home position (center, raw = CENTER_RAW).
  *
  * Latency notes
- *   - DXL 버스를 1 Mbps 로 운영. 모터가 출고 baud(57600) 면 첫 부팅 시
- *     자동으로 EEPROM 에 1 Mbps 를 기입하고 재연결한다 (idempotent).
- *   - 3축 명령은 SyncWrite, 3축 상태 읽기는 SyncRead 로 묶어 transaction 1회.
+ *   - DXL bus runs at 1 Mbps. If a motor is at factory baud (57600), the first boot
+ *     automatically writes 1 Mbps into its EEPROM and reconnects (idempotent).
+ *   - 3-axis commands use SyncWrite, 3-axis state reads use SyncRead — one transaction each.
  */
 
 #include <Arduino.h>
@@ -36,26 +36,26 @@
 //   Config
 // ───────────────────────────────────────────────
 static const long     SERIAL_BAUD          = 115200;
-static const long     DXL_BAUD_TARGET      = 1000000;  // 운영 baud (1 Mbps)
-static const long     DXL_BAUD_FACTORY     = 57600;    // 모터 출고 baud — auto-upgrade 경로
+static const long     DXL_BAUD_TARGET      = 1000000;  // operating baud (1 Mbps)
+static const long     DXL_BAUD_FACTORY     = 57600;    // motor factory baud — auto-upgrade path
 static const float    DXL_PROTOCOL         = 2.0;
 
 static const int      NUM_MOTORS           = 3;
 static const uint8_t  MOTOR_IDS[NUM_MOTORS] = {1, 2, 3};
 
-// signed step 범위 (-2048 ~ +2047, 총 4096 step = 1회전)
+// signed step range (-2048 ~ +2047, total 4096 steps = 1 revolution)
 static const int      STEP_MIN             = -2048;
 static const int      STEP_MAX             = +2047;
 
-// raw 위치 기준점: step 0 이 매핑되는 raw 값
+// raw position reference: the raw value that step 0 maps to
 static const int32_t  CENTER_RAW           = 2048;
 
-// 모션 완료 감지 (position tolerance only — MOVING 레지스터 폴링 제거)
+// motion completion detection (position tolerance only — MOVING register polling removed)
 static const unsigned long MOTION_TIMEOUT_MS  = 4000;
 static const int32_t       ARRIVED_TOLERANCE  = 10;
 static const uint16_t      MOTION_POLL_MS     = 5;
 
-// 프로파일 (속도/가속도 제한 — 0 이면 프로파일 비활성)
+// profile (velocity/acceleration limits — 0 disables the profile)
 static const uint32_t PROFILE_VEL          = 400;
 static const uint32_t PROFILE_ACC          = 80;
 
@@ -134,14 +134,14 @@ static inline uint8_t flagsByte() {
 //   Bus operations (SyncWrite / SyncRead)
 // ───────────────────────────────────────────────
 
-/* 3축 PRESENT_POSITION 을 한 transaction 으로 읽어 g_sr_data 에 채움. */
+/* Read 3-axis PRESENT_POSITION in one transaction and fill g_sr_data. */
 static bool readAllPresent() {
   g_sr_infos.is_info_changed = true;
   uint8_t recv = dxl.syncRead(&g_sr_infos);
   return recv == NUM_MOTORS;
 }
 
-/* 3축 GOAL_POSITION 을 한 transaction 으로 송신. 비블로킹. */
+/* Send 3-axis GOAL_POSITION in one transaction. Non-blocking. */
 static bool driveAll(const int target_steps[NUM_MOTORS]) {
   for (int i = 0; i < NUM_MOTORS; ++i) {
     g_sw_data[i].goal     = stepToRaw(target_steps[i]);
@@ -153,8 +153,8 @@ static bool driveAll(const int target_steps[NUM_MOTORS]) {
 }
 
 /*
- * stopAllMotors — 현재 위치를 새 목표로 잡아 즉시 정지.
- *   토크는 유지 (홀딩) — torqueOff 토글 방식 대비 자중 낙하 없음.
+ * stopAllMotors — stop immediately by setting the current position as the new goal.
+ *   Torque stays engaged (holding) — no gravity drop compared to the torqueOff toggle approach.
  */
 static bool stopAllMotors() {
   if (!readAllPresent()) return false;
@@ -172,8 +172,8 @@ static bool stopAllMotors() {
 // ───────────────────────────────────────────────
 
 /*
- * waitMotionComplete — position tolerance 만으로 도달 판정 (MOVING 레지스터 미사용).
- *   매 폴링 사이클에 syncRead 1 회로 3축 위치 동시 갱신.
+ * waitMotionComplete — judge arrival by position tolerance alone (MOVING register not used).
+ *   One syncRead per polling cycle refreshes all 3 axis positions at once.
  */
 static bool waitMotionComplete(unsigned long timeout_ms) {
   unsigned long t0 = millis();
@@ -202,7 +202,7 @@ static bool waitMotionComplete(unsigned long timeout_ms) {
 //   STATUS reply
 // ───────────────────────────────────────────────
 static void replySTATUS() {
-  readAllPresent();   // 실패해도 직전 캐시 값 사용
+  readAllPresent();   // on failure, use the previously cached values
   Serial.print("S ");
   for (int i = 0; i < NUM_MOTORS; ++i) {
     Serial.print(stepFromRaw(g_sr_data[i].present));
@@ -275,12 +275,12 @@ static void dispatch(char *line) {
 // ───────────────────────────────────────────────
 
 /*
- * ensureDxlBaud — 모터 baud 를 DXL_BAUD_TARGET (1 Mbps) 에 맞춤.
- *   1) target baud 로 ping → 성공이면 즉시 반환 (재부팅 후 정상 경로).
- *   2) factory baud 로 fallback → 모든 모터 EEPROM 에 target baud 기입.
- *   3) target baud 로 재연결, ping 검증.
+ * ensureDxlBaud — set the motor baud to DXL_BAUD_TARGET (1 Mbps).
+ *   1) ping at target baud → return immediately if it succeeds (normal path after reboot).
+ *   2) fall back to factory baud → write target baud into every motor's EEPROM.
+ *   3) reconnect at target baud, verify with ping.
  *
- *   EEPROM 기입은 1회성. 이후 부팅부터는 (1) 에서 바로 통과.
+ *   The EEPROM write is one-time. Later boots pass directly at step (1).
  */
 static bool ensureDxlBaud() {
   dxl.begin(DXL_BAUD_TARGET);
@@ -296,8 +296,8 @@ static bool ensureDxlBaud() {
   if (!any_found) return false;
 
   for (int i = 0; i < NUM_MOTORS; ++i) {
-    // setBaudrate 는 baud 값을 BAUD_RATE 레지스터 인덱스로 변환해 EEPROM 기입.
-    // 응답 ACK 까지는 기존 baud, ACK 직후 모터가 target baud 로 전환.
+    // setBaudrate converts the baud value to a BAUD_RATE register index and writes it to EEPROM.
+    // The old baud is used up to the response ACK; right after the ACK the motor switches to target baud.
     dxl.setBaudrate(MOTOR_IDS[i], DXL_BAUD_TARGET);
     delay(20);
   }
@@ -342,7 +342,7 @@ static void setupSyncStructs() {
 // ───────────────────────────────────────────────
 void setup() {
   Serial.begin(SERIAL_BAUD);
-  while (!Serial && millis() < 3000) { /* USB-CDC ready 대기 */ }
+  while (!Serial && millis() < 3000) { /* wait for USB-CDC ready */ }
 
   dxl.setPortProtocolVersion(DXL_PROTOCOL);
 
@@ -367,7 +367,7 @@ void setup() {
     dxl.writeControlTableItem(PROFILE_ACCELERATION, id, PROFILE_ACC);
     dxl.torqueOn(id);
 
-    // 초기 target_raw 를 현재 위치로 (갑작스런 점프 방지)
+    // initialize target_raw to the current position (prevents a sudden jump)
     g_motor[i].target_raw = dxl.getPresentPosition(id);
     g_motor[i].moving     = false;
   }

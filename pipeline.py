@@ -2,37 +2,39 @@
 Capstone 2026 — Full Pipeline Orchestrator
 ==========================================
 
-Phase 1 (driving) → Phase 2 (aiming & strike ×N) 통합 실행기.
+Phase 1 (driving) → Phase 2 (aiming & strike ×N) integrated runner.
 
-이 파일은 [run_phase1_visual_servo.py](run_phase1_visual_servo.py) 와
-[run_phase2_aiming.py](run_phase2_aiming.py) 의 동작을 **하나의 프로세스에서**
-연속 실행한다. 단일 OpenRB 시리얼 + 단일 RealSense 디바이스를 두 phase
-사이에서 공유하는 것이 이 orchestrator 의 핵심 책무다.
+This file runs the behaviors of [run_phase1_visual_servo.py](run_phase1_visual_servo.py)
+and [run_phase2_aiming.py](run_phase2_aiming.py) **in a single process**,
+back to back. Sharing a single OpenRB serial + a single RealSense device
+across the two phases is the core responsibility of this orchestrator.
 
-실행 모드
+Run modes
 --------
---mode sim   : 카메라/모터 없이 Pure Python 시뮬레이션 (어디서나 실행 가능)
---mode real  : RealSense + YOLO + OpenRB 실제 하드웨어 (Pi5 환경)
+--mode sim   : Pure Python simulation without camera/motors (runs anywhere)
+--mode real  : RealSense + YOLO + OpenRB real hardware (Pi5 environment)
 
-Phase 전환
+Phase transition
 ---------
-[Phase 1: Driving]   YOLO bbox + depth + 액티브 틸트 서보잉
-                      (run_phase1_visual_servo.py 와 동일)
+[Phase 1: Driving]   YOLO bbox + depth + active tilt servoing
+                      (same as run_phase1_visual_servo.py)
 
 [Phase 2: Aiming & Strike ×N]
-    카메라 90° 틸트 → 1s 측정창 (per-axis median plate-frame target)
-    → launcher offset/tilt 보정 → LevelingIK → 레벨링 모터 AIM →
-    STRIKE (flywheel + loader 단일 명령)
-    매 타격마다 종 위치 재추정 (또는 --static 시 1차 조준 재사용).
+    camera 90° tilt → 1s measurement window (per-axis median plate-frame target)
+    → launcher offset/tilt correction → LevelingIK → leveling motors AIM →
+    STRIKE (flywheel + loader single command)
+    Re-estimate the bell position on every strike (or reuse the first aim
+    with --static).
 
 CLI
 ---
-모든 파라미터는 config.yaml 에서 로드한다. CLI 인자는 가장 자주 토글하는
-3개(--mode / --dry-run / --debug-detect) 와 yaml 경로 선택용 --config 뿐.
+All parameters are loaded from config.yaml. CLI arguments are only the three
+most frequently toggled (--mode / --dry-run / --debug-detect) plus --config
+for selecting the yaml path.
 
-    python3 pipeline.py                                # config.yaml 기본
-    python3 pipeline.py --config configs/sim.yaml      # 다른 yaml
-    python3 pipeline.py --mode sim                     # yaml.mode 덮어쓰기
+    python3 pipeline.py                                # config.yaml default
+    python3 pipeline.py --config configs/sim.yaml      # different yaml
+    python3 pipeline.py --mode sim                     # override yaml.mode
     python3 pipeline.py --dry-run --debug-detect       # toggle override
 """
 from __future__ import annotations
@@ -45,7 +47,7 @@ from typing import Dict, List, Optional, Protocol, Tuple
 
 import numpy as np
 
-# ── 패키지 경로 추가 (root 에서 실행되는 통합 스크립트) ──
+# ── Add package paths (integrated script run from root) ──
 ROOT = Path(__file__).resolve().parent
 for sub in ("Driving", "LevelingPlatform", "perception"):
     p = str(ROOT / sub)
@@ -62,7 +64,7 @@ from config_loader import (                                          # noqa: E40
     load_args, visual_servo_config_from_args,
 )
 
-# ── run_phase~ 스크립트와 동일한 기본 경로/상수 ──
+# ── Same default paths/constants as the run_phase~ scripts ──
 TRAINING_RUNS = ROOT / "perception" / "training" / "runs"
 INDOOR_PT_FALLBACK = ROOT / "perception" / "detection" / "indoor.pt"
 INDOOR_HEF_FALLBACK = ROOT / "perception" / "detection" / "outdoor_v2.hef"
@@ -74,7 +76,7 @@ BBox = Tuple[int, int, int, int]
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Detector backends (run_phase~ 스크립트와 동일한 구현; 수동 sync 유지)
+# Detector backends (same implementation as the run_phase~ scripts; kept in manual sync)
 # ─────────────────────────────────────────────────────────────────────
 class _Detector(Protocol):
     """Backend-agnostic single-best-detection. Mirrors phase1/phase2 runner."""
@@ -183,7 +185,7 @@ def _build_detector_ctx(args):
 # Robot adapters — Phase 1 visual servo detection bridge + motor sinks.
 # ─────────────────────────────────────────────────────────────────────
 class SimulatedRobot:
-    """순수 Python 시뮬레이션. 차동 구동 정기구학 + dummy detection."""
+    """Pure Python simulation. Differential-drive forward kinematics + dummy detection."""
 
     def __init__(
         self,
@@ -256,16 +258,17 @@ class SimulatedRobot:
 
 
 class RealRobot:
-    """실제 하드웨어 어댑터 — RealSense + YOLO + OpenRB.
+    """Real hardware adapter — RealSense + YOLO + OpenRB.
 
-    하드웨어 클라이언트(camera, detector, wheel, tilt, leveling)는 main() 에서
-    ExitStack 으로 lifecycle 관리하여 주입한다. RealRobot 자체는 클라이언트를
-    construct 하지 않는다 — 단일 OpenRB 시리얼 FD 를 phase 간 공유하려면 외부
-    owner 가 필요하기 때문 ([COMMUNICATION_PROTOCOL.md](COMMUNICATION_PROTOCOL.md) §6.2).
+    The hardware clients (camera, detector, wheel, tilt, leveling) are
+    lifecycle-managed by an ExitStack in main() and injected here. RealRobot
+    does not construct the clients itself — an external owner is needed to
+    share the single OpenRB serial FD across phases
+    ([COMMUNICATION_PROTOCOL.md](docs/COMMUNICATION_PROTOCOL.md) §6.2).
     """
 
-    # Class name "RealRobot" 은 VisualServoPhase1Driver 가
-    # `type(robot).__name__` 으로 검사한다 (sim/real 페이싱 차이) — 이름 바꾸지 말 것.
+    # The class name "RealRobot" is inspected by VisualServoPhase1Driver via
+    # `type(robot).__name__` (sim/real pacing difference) — do not rename it.
 
     def __init__(
         self,
@@ -297,8 +300,8 @@ class RealRobot:
 
     # ── lifecycle ──
     def start(self) -> None:
-        # 카메라 / 시리얼 / detector 는 ExitStack 이 이미 enter 했고,
-        # warmup 도 main() 에서 완료된 상태.
+        # The camera / serial / detector are already entered by the ExitStack,
+        # and warmup is already completed in main().
         pass
 
     def stop(self) -> None:
@@ -322,11 +325,12 @@ class RealRobot:
             return None
         bbox, conf_val = pred
 
-        # depth_m may be None: D435i 깊이는 먼 거리(~2.5m)의 종(곡면/금속)에서
-        # IR 패턴이 안 돌아와 간헐적으로만 유효. 깊이 실패를 "타깃 상실"로
-        # 취급하면 조향 락을 버리고 SEARCH 로 회전 → 리밋 사이클. bbox 가
-        # 있으면 depth_m=None 으로 넘겨 컨트롤러가 조향/틸트는 계속하고
-        # 전진만 멈추게 한다.
+        # depth_m may be None: D435i depth is only intermittently valid for a
+        # bell (curved/metal) at long range (~2.5m) because the IR pattern
+        # doesn't return. Treating a depth failure as "target lost" would drop
+        # the steering lock and rotate into SEARCH → limit cycle. If a bbox
+        # exists, pass depth_m=None so the controller keeps steering/tilting
+        # and only stops driving forward.
         depth_m = compute_target_depth(
             depth, bbox,
             roi_frac=self.roi_frac,
@@ -378,7 +382,7 @@ class RealRobot:
 
     # ── split SPIN / LOAD (lead-aim, center-aim modes) ──
     # Decouples flywheel spin-up latency from per-shot trigger so the aim
-    # modes can pre-spin once and LOAD-즉발 at the right moment. Same
+    # modes can pre-spin once and LOAD-instantly at the right moment. Same
     # primitives RealPhase2Robot exposes in run_phase2_aiming.py.
     def spin_up(self, rpm: int) -> None:
         self.leveling._command(f"SPIN {rpm} {rpm}")
@@ -398,7 +402,7 @@ class RealRobot:
 # Pipeline orchestrator
 # ─────────────────────────────────────────────────────────────────────
 class CapstonePipeline:
-    """Phase 1 (Driving) → Phase 2 (Aiming & Strike ×N) 통합 실행기."""
+    """Phase 1 (Driving) → Phase 2 (Aiming & Strike ×N) integrated runner."""
 
     def __init__(
         self,
@@ -485,7 +489,7 @@ class CapstonePipeline:
         print("  Capstone 2026 Pipeline START")
         print("=" * 70)
 
-        # 명시적 leveling home — 이전 run 의 잔여 자세에서 시작하지 않도록.
+        # Explicit leveling home — so it doesn't start from the residual pose of a prior run.
         print("[PIPELINE] leveling home → aim 0 0 0")
         self.robot.send_leveling_angles([0.0, 0.0, 0.0], [0, 0, 0])
 
@@ -551,8 +555,8 @@ class CapstonePipeline:
         print(f"── PHASE 2: AIMING & STRIKE x{self.num_strikes} ──")
 
         self.robot.tilt_camera(self.tilt_deg)
-        # 명시적 leveling home — plate 가 이전 run / Phase 1 잔여 자세에서 시작하지
-        # 않도록 (run_phase2_aiming.run_phase2 와 동일).
+        # Explicit leveling home — so the plate doesn't start from the residual
+        # pose of a prior run / Phase 1 (same as run_phase2_aiming.run_phase2).
         self.robot.send_leveling_angles([0.0, 0.0, 0.0], [0, 0, 0])
         time.sleep(self.tilt_settle_sec)
 
@@ -575,12 +579,13 @@ class CapstonePipeline:
                 print(f"  target (plate frame): ({target_xyz[0]:+.3f}, "
                       f"{target_xyz[1]:+.3f}, {target_xyz[2]:+.3f}) m")
 
-                # Launcher offset: projectile은 (R @ L) 위치에서 plate normal 방향으로
-                # 나가지만, 작은 L 대비 큰 사거리에서 R≈I 가정 하 target 에서 단순 차감.
+                # Launcher offset: the projectile exits from the (R @ L) position
+                # along the plate normal, but for a large range relative to a small
+                # L, under the R≈I assumption this is just subtracted from the target.
                 aim_xyz = np.asarray(target_xyz, dtype=float) - self.launcher_offset
 
-                # Launcher angular misalignment: projectile 방향이 plate normal 과
-                # 정확히 일치하지 않으면 d·sin(a) 만큼 target 을 lateral 시프트.
+                # Launcher angular misalignment: if the projectile direction does
+                # not exactly match the plate normal, shift the target laterally by d·sin(a).
                 a_x = np.deg2rad(self.launcher_tilt_deg[0])
                 a_y = np.deg2rad(self.launcher_tilt_deg[1])
                 if a_x != 0.0 or a_y != 0.0:
@@ -626,8 +631,8 @@ def _build_real_hardware(args, stack: ExitStack):
 
     Returns (camera, detector, wheel, tilt_async, tilt_sync, leveling).
 
-    Single OpenRB serial: wheel 이 FD owner. Tilt async/sync 와 leveling 은
-    같은 FD 를 piggy-back ([COMMUNICATION_PROTOCOL.md](COMMUNICATION_PROTOCOL.md) §6.2).
+    Single OpenRB serial: wheel is the FD owner. Tilt async/sync and leveling
+    piggy-back on the same FD ([COMMUNICATION_PROTOCOL.md](docs/COMMUNICATION_PROTOCOL.md) §6.2).
     """
     from Driving.wheel_motor import WheelMotorClient, WheelMotorConfig
     from LevelingPlatform.leveling_motor import (
@@ -646,8 +651,9 @@ def _build_real_hardware(args, stack: ExitStack):
     # OpenRB single-serial FD: wheel = owner.
     wheel_cfg = WheelMotorConfig(
         port=args.port, baud=args.baud, dry_run=args.dry_run,
-        # tilt sync motion-complete (waitMotion 최대 4s) 가 끊기지 않게 wheel
-        # 쪽도 5s. wheel sync(PING/STOP)는 즉시 응답이라 부작용 없음.
+        # Keep the wheel side at 5s too so the tilt sync motion-complete
+        # (waitMotion up to 4s) isn't cut off. The wheel sync (PING/STOP)
+        # responds immediately, so there's no side effect.
         sync_read_timeout_sec=5.0,
     )
     leveling_cfg = MotorClientConfig(
@@ -668,7 +674,7 @@ def _build_real_hardware(args, stack: ExitStack):
         tilt_async._ser = wheel._ser
         tilt_sync._ser = wheel._ser
 
-    # Camera: Phase 1 시작 전 start + warmup.
+    # Camera: start + warmup before Phase 1 begins.
     camera = stack.enter_context(
         RealSenseCamera(CAMERA, hardware_reset_on_start=True)
     )
@@ -775,7 +781,7 @@ def main():
     )
     print(f"[pipeline] config  : {args.config_path}")
 
-    # ── SIM 경로: 하드웨어 없음, ExitStack 불필요 ──
+    # ── SIM path: no hardware, no ExitStack needed ──
     if args.mode == "sim":
         robot = SimulatedRobot(
             start_xy=(args.start_x, args.start_y),
@@ -783,16 +789,16 @@ def main():
             wheel_diameter=args.wheel_diameter,
             wheel_base=args.wheel_base,
         )
-        # SIM 모드는 정적 타깃만 지원 — center/lead aim 은 실시간 카메라가
-        # 필요하므로 sim 에서 요청되면 명시적으로 거부 (사용자에게 헷갈리
-        # 지 않게 일찍 fail).
+        # SIM mode only supports a static target — center/lead aim need a
+        # live camera, so reject them explicitly when requested in sim (fail
+        # early so it's not confusing to the user).
         if args.center_aim or args.lead_aim:
             print("[pipeline] ✗ --center-aim / --lead-aim require real "
                   "hardware (camera). Re-run with --mode real, or omit "
                   "the flag for static aim.")
             sys.exit(2)
 
-        # SIM 에서는 Phase 2 측정도 dummy provider 재사용
+        # In SIM, Phase 2 measurement also reuses the dummy provider
         sim_dummy_cfg = DummyTargetConfig(
             phase1_target=(args.phase1_x, args.phase1_y),
             phase2_target=(args.phase2_x, args.phase2_y, args.phase2_z),
@@ -808,7 +814,7 @@ def main():
             robot.stop()
         sys.exit(0 if ok else 1)
 
-    # ── REAL 경로: ExitStack 으로 모든 하드웨어 lifecycle 관리 ──
+    # ── REAL path: manage all hardware lifecycle with an ExitStack ──
     with ExitStack() as stack:
         (camera, detector, wheel, tilt_async, tilt_sync,
          leveling) = _build_real_hardware(args, stack)
@@ -823,7 +829,7 @@ def main():
             debug_detect=args.debug_detect,
         )
 
-        # Phase 2 real provider — extrinsic + min_conf 모두 CLI 에서 주입.
+        # Phase 2 real provider — both extrinsic + min_conf injected from the CLI.
         from detection.phase2_target import (
             CameraToPlateExtrinsic, Phase2TargetEstimator, RealPhase2TargetProvider,
         )

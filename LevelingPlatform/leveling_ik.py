@@ -1,46 +1,46 @@
 """
 3-RRS Leveling Platform — inverse kinematics module.
 
-목표 3D 점 (x, y, z) → 플레이트 normal 을 그 방향으로 정렬하기 위한
-3개의 모터 각도를 계산.
+Target 3D point (x, y, z) → compute the 3 motor angles needed to align the
+plate normal toward that direction.
 
-차량 / 하드웨어 모델
+Vehicle / hardware model
 -----------------
-- 베이스 반경 Rb 위에 120° 간격으로 3개의 모터.
-- 각 모터에 길이 La 의 크랭크 (B 점에서 회전, 회전축은 접선 방향).
-- 길이 Lc 의 커플러가 크랭크 끝 A 와 플레이트 조인트 P 를 연결.
-  * A: 회전 조인트 (접선축) → 커플러는 모터의 r̂-z 수직 평면에 머무름.
-  * P: 구면 (RC 볼) 조인트, 플레이트 +z 축 기준 BALL_MAX_DEG 까지 굴곡 허용.
-- 상부 플레이트는 반경 Rp = Rb - La 의 원 위에 부착.
-- 홈 자세 (모든 모터 θ=0): 크랭크 수평 (안쪽), 커플러 수직.
-  플레이트 중심 = (0, 0, H0=Lc).
+- 3 motors at 120° spacing on a base of radius Rb.
+- Each motor has a crank of length La (rotating at point B, axis of rotation is tangential).
+- A coupler of length Lc connects the crank tip A to the plate joint P.
+  * A: revolute joint (tangential axis) → the coupler stays in the motor's r̂-z vertical plane.
+  * P: spherical (RC ball) joint, allows deflection up to BALL_MAX_DEG relative to the plate +z axis.
+- The top plate is attached on a circle of radius Rp = Rb - La.
+- Home pose (all motors θ=0): crank horizontal (inward), coupler vertical.
+  Plate center = (0, 0, H0=Lc).
 
-3-RRS 중심 오프셋
+3-RRS center offset
 ----------------
-플레이트가 기울어지면 모든 P_i 가 자기 모터의 r̂-z 평면 안에 머물도록
-중심이 수평으로 약간 미끄러진다. _plate_center_offset() 가 이를 닫힌형
-으로 산출.
+When the plate tilts, the center slides slightly horizontally so that every P_i
+stays in its own motor's r̂-z plane. _plate_center_offset() computes this in
+closed form.
 
-사용 예
+Usage example
 ------
     from leveling_ik import LevelingIK, LevelingConfig
 
-    cfg = LevelingConfig()                  # 기본값이 빌드 사양과 일치
+    cfg = LevelingConfig()                  # defaults match the build spec
     ik  = LevelingIK(cfg)
-    out = ik.aim_at((0.10, 0.00, 3.0))      # plate-base frame 의 3D 점
+    out = ik.aim_at((0.10, 0.00, 3.0))      # 3D point in the plate-base frame
     if out['ok']:
-        send_to_motors(out['angles_steps'])  # 인코더 step (0..motor_steps-1)
+        send_to_motors(out['angles_steps'])  # encoder step (0..motor_steps-1)
     else:
-        # 길이 불가 또는 볼 조인트 한계 초과 → 베이스 재정렬 후 재시도
+        # length infeasible or ball joint limit exceeded → realign base and retry
         ...
 
 CLI
 ---
     python3 leveling_ik.py --target 0.10 0.00 3.0
 
-의존성
+Dependencies
 -----
-numpy 만 사용. 헤드리스 (Pi5 OK).
+Uses numpy only. Headless (Pi5 OK).
 """
 
 from __future__ import annotations
@@ -56,30 +56,30 @@ import numpy as np
 # ──────────────────────────────────────────────
 @dataclass
 class LevelingConfig:
-    # ── 기구 파라미터 ──
+    # ── Mechanism parameters ──
     Rb: float = 0.108                 # base pivot radius [m]
     La: float = 0.035                 # crank length [m]
     Lc: float = 0.111                 # coupler length [m]
 
-    # ── 모터 파라미터 ──
+    # ── Motor parameters ──
     motor_phis_deg: Tuple[float, float, float] = (0.0, 120.0, 240.0)  # azimuths
     motor_steps: int = 4096          # encoder counts / revolution
 
-    # ── 한계 ──
+    # ── Limits ──
     ball_max_deg: float = 30.0       # P-side ball joint deflection limit
 
-    # ── 출력 ──
-    quantize: bool = True            # 인코더 step 으로 round 할지
+    # ── Output ──
+    quantize: bool = True            # whether to round to encoder steps
 
-    # ── 파생값 ──
+    # ── Derived values ──
     @property
     def Rp(self) -> float:
-        """플레이트 조인트 반경 (홈 자세에 의해 강제: crank 수평 + 커플러 수직)."""
+        """Plate joint radius (forced by the home pose: crank horizontal + coupler vertical)."""
         return self.Rb - self.La
 
     @property
     def H0(self) -> float:
-        """홈 자세에서 플레이트 중심 높이."""
+        """Plate center height at the home pose."""
         return self.Lc
 
     @property
@@ -91,31 +91,31 @@ class LevelingConfig:
 # IK module
 # ──────────────────────────────────────────────
 class LevelingIK:
-    """3-RRS 평탄화 플랫폼 역기구학."""
+    """3-RRS leveling platform inverse kinematics."""
 
     def __init__(self, cfg: Optional[LevelingConfig] = None):
         self.cfg = cfg if cfg is not None else LevelingConfig()
         self._phi = np.deg2rad(
             np.asarray(self.cfg.motor_phis_deg, dtype=float))
 
-    # ── 메인 API ──
+    # ── Main API ──
     def aim_at(
         self,
         target,
         height: Optional[float] = None,
     ) -> Dict:
         """
-        플레이트 중심 (0, 0, height) 에서 target 3D 점을 향하도록 모터 각도 산출.
+        Compute motor angles so the plate center (0, 0, height) aims at the target 3D point.
 
         Parameters
         ----------
-        target  플레이트-베이스 프레임의 (x, y, z) [m]
-                ※ 카메라 좌표계 결과는 호출 측에서 미리 변환해 둘 것.
-        height  플레이트 중심 z [m] (None → cfg.H0)
+        target  (x, y, z) [m] in the plate-base frame
+                Note: camera-frame results must be transformed by the caller beforehand.
+        height  plate center z [m] (None → cfg.H0)
 
         Returns
         -------
-        dict — aim_normal() 과 동일.
+        dict — same as aim_normal().
         """
         h = self.cfg.H0 if height is None else height
         T = np.asarray(target, dtype=float)
@@ -130,18 +130,18 @@ class LevelingIK:
         height: Optional[float] = None,
     ) -> Dict:
         """
-        플레이트 normal (unit vector) 을 직접 입력해 모터 각도 산출.
+        Compute motor angles by directly supplying the plate normal (unit vector).
 
         Returns
         -------
         dict
-            angles_deg     list[float]|None   모터 각도 [deg] (도달 불가면 None)
-            angles_rad     list[float]|None   모터 각도 [rad]
-            angles_steps   list[int]|None     인코더 step (round)
-            ok             bool               길이 OK AND 볼 한계 OK
-            ball_deg       list[float|None]   각 leg 의 볼 굴곡 [deg]
-            c_shift_m      tuple[float,float] 플레이트 중심 수평 시프트 [m]
-            normal         list[float]        명령된 plate normal (unit)
+            angles_deg     list[float]|None   motor angles [deg] (None if unreachable)
+            angles_rad     list[float]|None   motor angles [rad]
+            angles_steps   list[int]|None     encoder step (rounded)
+            ok             bool               length OK AND ball limit OK
+            ball_deg       list[float|None]   ball deflection of each leg [deg]
+            c_shift_m      tuple[float,float] plate center horizontal shift [m]
+            normal         list[float]        commanded plate normal (unit)
         """
         h = self.cfg.H0 if height is None else height
         thetas, ok, ball = self._inverse_kinematics(normal, h)
@@ -164,10 +164,10 @@ class LevelingIK:
             "normal":       [float(n[0]), float(n[1]), float(n[2])],
         }
 
-    # ── 내부: 회전 / 중심 시프트 / IK ──
+    # ── Internal: rotation / center shift / IK ──
     @staticmethod
     def _rot_from_normal(n) -> np.ndarray:
-        """+z → unit vector n 으로의 최단호 회전 (yaw-free)."""
+        """Shortest-arc rotation from +z to unit vector n (yaw-free)."""
         n = np.asarray(n, dtype=float)
         n = n / np.linalg.norm(n)
         z = np.array([0.0, 0.0, 1.0])
@@ -185,8 +185,8 @@ class LevelingIK:
 
     def _plate_center_offset(self, R) -> Tuple[float, float]:
         """
-        Yaw-free R 에 대해, 모든 P_i 가 모터의 r̂-z 평면에 들도록 만드는
-        플레이트 중심 수평 시프트 (cx, cy).
+        For yaw-free R, the plate center horizontal shift (cx, cy) that makes
+        every P_i lie in its motor's r̂-z plane.
         """
         Rp = self.cfg.Rp
         a = np.zeros(3)
@@ -206,9 +206,9 @@ class LevelingIK:
         """
         normal + height → (thetas_rad, ok, ball_deg).
 
-        thetas_rad  : (3,) 모터 각도 [rad] (도달 불가 leg 는 NaN)
-        ok          : 모든 leg 도달 AND 모든 볼 굴곡 ≤ ball_max_deg
-        ball_deg    : (3,) P-side 볼 굴곡 [deg] (도달 불가 leg 는 NaN)
+        thetas_rad  : (3,) motor angles [rad] (NaN for unreachable legs)
+        ok          : all legs reachable AND all ball deflections ≤ ball_max_deg
+        ball_deg    : (3,) P-side ball deflection [deg] (NaN for unreachable legs)
         """
         c = self.cfg
         Rp = c.Rp
@@ -238,7 +238,7 @@ class LevelingIK:
                 ok = False
                 continue
 
-            # '-' branch → 홈 자세에서 θ=0
+            # '-' branch → θ=0 at the home pose
             th = np.arctan2(v, u) - np.arccos(-k / rho)
             th = (th + np.pi) % (2.0 * np.pi) - np.pi
             if c.quantize:

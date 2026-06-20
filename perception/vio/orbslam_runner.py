@@ -52,11 +52,11 @@ def _flush_realsense(hardware_reset: bool = False, settle_sec: float = 2.0):
     Parameters
     ----------
     hardware_reset : bool
-        D435i 의 USB 디바이스를 power-cycle. 'failed to set power state' 같은
-        suspend / 잔류 stream config 가 원인인 경우 가장 깨끗한 복구 수단.
-        USB re-enumeration 이 ~5s 걸리므로 retry path 에서만 권장.
+        Power-cycle the D435i USB device. The cleanest recovery means when the
+        cause is suspend / residual stream config such as 'failed to set power state'.
+        USB re-enumeration takes ~5s, so recommended only on the retry path.
     settle_sec : float
-        flush 후 카메라가 다시 안정될 때까지 대기 시간.
+        Wait time until the camera stabilizes again after the flush.
     """
     try:
         import pyrealsense2 as rs
@@ -71,7 +71,7 @@ def _flush_realsense(hardware_reset: bool = False, settle_sec: float = 2.0):
                         name = "?"
                     print(f"[ORBSLAM] hardware_reset {name}")
                     d.hardware_reset()
-                # USB re-enumeration 대기 (Pi 환경에서 ~5s 필요)
+                # wait for USB re-enumeration (~5s needed in the Pi environment)
                 time.sleep(max(settle_sec, 5.0))
             except Exception as e:
                 print(f"[ORBSLAM] hardware_reset failed: {e}")
@@ -81,7 +81,7 @@ def _flush_realsense(hardware_reset: bool = False, settle_sec: float = 2.0):
         cfg.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 15)
         cfg.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 15)
         pipe.start(cfg)
-        # 2 frame 만 받아 stream 가동 확인 (10→2: 0.6s 단축)
+        # grab only 2 frames to confirm the stream is running (10→2: 0.6s faster)
         for _ in range(2):
             pipe.wait_for_frames(timeout_ms=5000)
         pipe.stop()
@@ -160,8 +160,8 @@ def build_yaml(calib, base_yaml_path, out_path, orb_nfeatures=None):
     Parameters
     ----------
     orb_nfeatures : int | None
-        설정 시 base yaml 의 `ORBextractor.nFeatures` 를 이 값으로 교체.
-        None 이면 base yaml 값 그대로 사용.
+        If set, replace the base yaml's `ORBextractor.nFeatures` with this value.
+        If None, use the base yaml value as-is.
     """
     with open(base_yaml_path, "r") as f:
         content = f.read()

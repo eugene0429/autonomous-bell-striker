@@ -61,27 +61,28 @@ class VisualServoConfig:
     coast_lost_frames: int = 3
     hold_lost_frames: int = 15
     coast_speed_scale: float = 0.7
-    # SEARCH 동작: 회전 대신 천천히 전진(creep). 헤딩 락을 유지하면서
-    # 종을 향해 다가가다 보면 (대개 종이 정면이라) 재포착 가능성이 높고,
-    # 회전 search 시 발생하던 limit-cycle 위험도 없다.
+    # SEARCH behavior: slow forward creep instead of rotating. Keeping the heading
+    # lock while approaching the bell (which is usually dead ahead) gives a high
+    # chance of re-acquisition, and avoids the limit-cycle risk of a rotating search.
     search_creep_v: float = 0.05         # [m/s] forward creep during SEARCH
     search_timeout_s: float = 30.0
 
-    # ── robustness vs. 종 vertical oscillation (spec §9) ──
+    # ── robustness vs. bell vertical oscillation (spec §9) ──
     horiz_dist_lp_alpha: float = 0.2     # LPF α on horiz_dist (τ ≈ 0.27s)
-    tilt_err_deadband_px: int = 8        # |err_y_px| < N → tilt 갱신 skip
-    stop_debounce_frames: int = 3        # stop 조건 연속 N 프레임 필요
+    tilt_err_deadband_px: int = 8        # |err_y_px| < N → skip tilt update
+    stop_debounce_frames: int = 3        # stop condition required for N consecutive frames
 
     # ── post-stop fine alignment (horiz_dist → d_stop_m) ──
-    # 정지 조건 충족 후 별도 ALIGN 단계에서 아주 느린 속도로 전후진하여
-    # horiz_dist 를 d_stop_m 에 맞춘다. tilt-brake 가 켜진 기본 설정에서는
-    # 정지 시점의 horiz_dist 가 target 보다 가깝거나 멀 수 있어 마무리 정렬이
-    # 필요. enabled=False (기본) → 기존 TRACK→DONE 직행 거동 그대로.
+    # After the stop condition is met, a separate ALIGN phase moves forward/backward
+    # at a very slow speed to bring horiz_dist onto d_stop_m. With the default
+    # config (tilt-brake on), horiz_dist at the stop moment may be closer or farther
+    # than the target, so a final alignment is needed. enabled=False (default) →
+    # keeps the existing direct TRACK→DONE behavior.
     align_enabled: bool = False
-    align_v: float = 0.05                # [m/s] 매우 느린 정렬 속도
-    align_tol_m: float = 0.02            # |horiz_dist - d_stop_m| < tol → 만족
-    align_debounce_frames: int = 5       # 만족 프레임 연속 N → DONE
-    align_timeout_s: float = 10.0        # 안전 timeout (도달 못 해도 commit)
+    align_v: float = 0.05                # [m/s] very slow alignment speed
+    align_tol_m: float = 0.02            # |horiz_dist - d_stop_m| < tol → satisfied
+    align_debounce_frames: int = 5       # N consecutive satisfied frames → DONE
+    align_timeout_s: float = 10.0        # safety timeout (commit even if not reached)
 
     # ── loop ──
     dt: float = 0.067            # 15 Hz
@@ -139,8 +140,9 @@ class VisualServoController:
         self._state = "TRACK"
 
         bbox = detection["bbox"]
-        # depth_m may be None: bbox는 유효하지만 깊이 ROI가 비어 거리 미상.
-        # 이 경우 조향/틸트는 계속하고 전진(v)·정지판정만 건너뛴다 (heading lock 유지).
+        # depth_m may be None: the bbox is valid but the depth ROI is empty, so
+        # distance is unknown. In this case keep steering/tilting and only skip
+        # forward motion (v) and the stop decision (maintaining heading lock).
         depth_raw = detection.get("depth_m")
         have_depth = depth_raw is not None and math.isfinite(float(depth_raw))
         cx_px = 0.5 * (bbox[0] + bbox[2])
@@ -380,8 +382,9 @@ class VisualServoController:
     def _search(self) -> Dict:
         c = self.cfg
         self._state = "SEARCH"
-        # 회전 대신 전진 creep — 헤딩 락을 유지해서 재포착 시 컨트롤러가
-        # 그대로 이어받게 한다 (회전 search 는 limit-cycle 위험).
+        # Forward creep instead of rotating — keep the heading lock so the
+        # controller resumes seamlessly on re-acquisition (a rotating search
+        # risks a limit cycle).
         v = c.search_creep_v
         omega = 0.0
         wL, wR = self._wheel_omegas(v, omega)

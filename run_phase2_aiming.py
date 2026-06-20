@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Phase 2 aiming & strike runner — real RealSense + YOLO + leveling + flywheel.
 
-Sequence: camera 90° up → 1 s 측정 (multi-frame median plate-frame target) →
+Sequence: camera 90° up → 1 s measurement (multi-frame median plate-frame target) →
 LevelingIK → leveling motors AIM → STRIKE (flywheel + loader).
 Phase 1 is NOT included — assumes the robot is already positioned ~under
 the bell. Mirrors:
@@ -15,14 +15,14 @@ Backends:
                            uses perception.detection.hailo_yolo26 decoder.
 
 Usage:
-    모든 파라미터는 config.yaml 에서 로드한다 (pipeline.py 와 동일 yaml 공유).
-    CLI 는 --config / --dry-run 토글만.
+    All parameters are loaded from config.yaml (shares the same yaml as pipeline.py).
+    The CLI only accepts the --config / --dry-run toggles.
 
     python3 run_phase2_aiming.py
     python3 run_phase2_aiming.py --config configs/lead.yaml
     python3 run_phase2_aiming.py --dry-run              # serial off (no hardware)
 
-    조준 모드는 yaml 의 `phase2.aim_mode` 키로 선택: static | lead | center.
+    The aim mode is selected via the yaml `phase2.aim_mode` key: static | lead | center.
 """
 from __future__ import annotations
 
@@ -177,7 +177,7 @@ class RealPhase2Robot:
 
     # ── split SPIN/LOAD (lead-aim mode) ──
     # Decouples spin-up latency (~1 s) from per-shot trigger, so lead-aim
-    # can pre-spin once and trigger LOAD (즉발) at the right moment.
+    # can pre-spin once and trigger LOAD (instantly) at the right moment.
     # COMMUNICATION_PROTOCOL.md §4: SPIN/LOAD are independent sync commands;
     # STRIKE is just SPIN→sleep→LOAD→SPIN 0 0 wrapped on the OpenRB side.
     def spin_up(self, rpm: int) -> None:
@@ -198,8 +198,8 @@ class RealPhase2Robot:
 def _apply_launcher_correction(target_xyz: np.ndarray, ik: LevelingIK, args) -> np.ndarray:
     """Subtract launcher exit offset + small-angle barrel tilt from a
     plate-frame target so plate normal aims the launcher at the bell
-    rather than the plate center. Same 1차 근사 (R≈I) used by both static
-    and lead-aim modes."""
+    rather than the plate center. Same first-order approximation (R≈I) used by
+    both static and lead-aim modes."""
     launcher_offset = np.array([
         args.launcher_offset_x,
         args.launcher_offset_y,
@@ -405,9 +405,9 @@ def run_phase2_lead_aim(
       3. When `tracker.ready` and `tracker.is_safe_to_fire(Δt)` are both True
          AND the inter-shot lockout has elapsed, compute predicted z* =
          z_now + v·Δt, AIM at (x_now, y_now, z*), wait `plate_settle_sec`,
-         then LOAD (즉발).
+         then LOAD (instantly).
       4. If not safe (predicted z crosses an endpoint within Δt), keep
-         observing — caller's "한 박자 쉬고" policy: do nothing this frame
+         observing — caller's "skip a beat" policy: do nothing this frame
          and re-evaluate next frame. The half-cycle reversal will be picked
          up by endpoint detection within a few frames.
       5. After all shots, SPIN 0 0.
@@ -528,7 +528,7 @@ def run_phase2_lead_aim(
                 print(f"  ✗ shot {shot}: no safe opportunity in "
                       f"{args.lead_max_wait_sec:.1f} s — skip")
 
-        # 마지막 LOAD 후 SPIN 0 0 까지 2초 hold — 탄환 비행 중 RPM 강하 방지.
+        # Hold 2s after the last LOAD before SPIN 0 0 — prevents an RPM drop while the projectile is in flight.
         if last_shot_t is not None:
             hold = 2.0 - (time.monotonic() - last_shot_t)
             if hold > 0:
@@ -553,7 +553,7 @@ def run_phase2_center_aim(
     z_top, z_bot are known a priori (pre-mission calibration). The aim point
     z_center = (z_top + z_bot) / 2 is fixed. Lateral (x, y) is quasi-static —
     measured once at the start. The plate is AIM'd ONCE at
-    (x_bell, y_bell, z_center) and held; per-shot we only LOAD (즉발) when
+    (x_bell, y_bell, z_center) and held; per-shot we only LOAD (instantly) when
     the bell's predicted z falls inside (bell_radius − safety_margin) of
     z_center.
 
@@ -770,7 +770,7 @@ def run_phase2_center_aim(
                 print(f"  ✗ shot {shot}: no firing opportunity in "
                       f"{args.center_max_wait_sec:.1f} s — skip")
 
-        # 마지막 LOAD 후 SPIN 0 0 까지 2초 hold — 탄환 비행 중 RPM 강하 방지.
+        # Hold 2s after the last LOAD before SPIN 0 0 — prevents an RPM drop while the projectile is in flight.
         if last_shot_t is not None:
             hold = 2.0 - (time.monotonic() - last_shot_t)
             if hold > 0:
@@ -886,8 +886,8 @@ def main():
 
     # LevelingMotorClient owns the single OpenRB serial; TiltClient piggy-backs
     # on its open FD (OpenRB has one USB-CDC, proto §6.2).
-    # hardware_reset_on_start=True: USB suspend ('failed to set power state')
-    # 회복 후 첫 connection 안정화. ~5s 시동 지연.
+    # hardware_reset_on_start=True: stabilize the first connection after
+    # recovering from USB suspend ('failed to set power state'). ~5s startup delay.
     with ExitStack() as stack:
         detector = stack.enter_context(detector_ctx)
         camera = stack.enter_context(

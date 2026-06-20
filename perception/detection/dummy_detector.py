@@ -1,26 +1,28 @@
 """
-Dummy Target Provider — YOLO 학습 전 파이프라인 통합 테스트용.
+Dummy Target Provider — for pipeline integration testing before YOLO training.
 
-실제 detection 파이프라인 (YOLO + depth + frame averaging + camera→world 변환)
-을 우회해서, Phase 1 / Phase 2 의 타겟 좌표를 *직접* 반환하는 stub.
+A stub that bypasses the real detection pipeline (YOLO + depth + frame averaging
++ camera→world transform) and returns the Phase 1 / Phase 2 target coordinates
+*directly*.
 
-YOLO 학습이 끝나면 [perception/detection/detector.py](detector.py) +
-[perception/detection/position_estimator.py](position_estimator.py) 의 실제
-체인으로 교체. 그 시점에는 본 클래스가 더 이상 필요 없다.
+Once YOLO training is done, replace it with the real chain of
+[perception/detection/detector.py](detector.py) +
+[perception/detection/position_estimator.py](position_estimator.py). At that
+point this class is no longer needed.
 
-좌표계
-------
+Coordinate frames
+-----------------
 - get_phase1_target()  : world frame (x, y) [m]
-                         로봇 출발 자세 = origin, world_x = camera forward.
+                         robot starting pose = origin, world_x = camera forward.
 - get_phase2_target()  : plate-base frame (x, y, z) [m]
-                         플레이트 중심 (0, 0, H0=Lc) 에서 본 종 위치.
-                         (실제 시스템에서는 Camera→Plate 외부 변환이 적용된 값)
+                         bell position seen from the plate center (0, 0, H0=Lc).
+                         (in the real system, a value with the Camera→Plate extrinsic transform applied)
 
-진동하는 종 시뮬레이션
---------------------
-get_phase2_target() 는 매 호출 시 phase2_jitter (m) 만큼의 z 노이즈를
-더해 반환한다 (3 m 높이에서 수직 진동하는 종을 모사). 이를 통해
-"매 타격 직전 3D 벡터 재추정" 로직이 정상 동작하는지 확인 가능.
+Oscillating bell simulation
+--------------------------
+On each call, get_phase2_target() adds z noise of up to phase2_jitter (m) before
+returning (simulating a bell oscillating vertically at 3 m height). This lets you
+verify that the "re-estimate the 3D vector right before each strike" logic works.
 """
 
 from __future__ import annotations
@@ -33,17 +35,17 @@ import numpy as np
 
 @dataclass
 class DummyTargetConfig:
-    # ── Phase 1: 종 베이스의 지면 투영 좌표 (world frame) ──
+    # ── Phase 1: ground-projection coordinates of the bell base (world frame) ──
     phase1_target: Tuple[float, float] = (3.0, 2.0)        # (x, y) [m]
 
-    # ── Phase 2: 플레이트 중심 → 종까지의 3D 벡터 ──
+    # ── Phase 2: 3D vector from the plate center → the bell ──
     phase2_target: Tuple[float, float, float] = (0.10, 0.00, 3.00)  # (x, y, z) [m]
-    phase2_jitter: float = 0.05                            # ±jitter 의 z 노이즈 [m]
+    phase2_jitter: float = 0.05                            # ±jitter z noise [m]
     phase2_jitter_seed: int = 42
 
-    # ── Phase 1 multi-frame 평균 모사 (선택) ──
-    phase1_noise_std: float = 0.0                          # 단일 검출 노이즈 std [m]
-    phase1_avg_frames: int = 1                             # 평균에 사용할 프레임 수
+    # ── Phase 1 multi-frame averaging simulation (optional) ──
+    phase1_noise_std: float = 0.0                          # single-detection noise std [m]
+    phase1_avg_frames: int = 1                             # number of frames used for averaging
 
     # ── visual-servo sim (Phase 1 bypass) ──
     bell_height_m: float = 3.0                    # mean ground-frame z of the bell
@@ -57,16 +59,17 @@ class DummyTargetConfig:
     vs_depth_noise_m: float = 0.0
     vs_dropout_prob: float = 0.0                  # probability a frame returns None
 
-    # ── 종 vertical oscillation (spec §9) ──
-    # amp=0 → 종 정지 (기본). amp>0 → 매 endpoint 도달 시 (lo, hi) 균등 분포
-    # 에서 traverse 시간을 재샘플링 → speed = amp / traverse_time 으로 +/- 방향 왕복.
+    # ── bell vertical oscillation (spec §9) ──
+    # amp=0 → bell stationary (default). amp>0 → on reaching each endpoint, resample
+    # the traverse time from a uniform (lo, hi) distribution → speed = amp / traverse_time,
+    # oscillating back and forth in +/- direction.
     bell_height_amp_m: float = 0.0                          # peak-to-peak [m]
     bell_endpoint_period_s: Tuple[float, float] = (0.5, 2.5)
-    bell_dt_s: float = 0.067                                # 호출당 advance dt
+    bell_dt_s: float = 0.067                                # advance dt per call
 
 
 class DummyTargetProvider:
-    """파이프라인 통합 테스트용 타겟 좌표 제공기."""
+    """Target coordinate provider for pipeline integration testing."""
 
     def __init__(self, cfg: DummyTargetConfig | None = None):
         self.cfg = cfg if cfg is not None else DummyTargetConfig()
@@ -105,17 +108,17 @@ class DummyTargetProvider:
     # ── Phase 1 ──
     def get_phase1_target(self) -> Tuple[float, float]:
         """
-        출발 직전, YOLO 다중 프레임 평균으로 추정된 종의 world (x, y).
+        Bell's world (x, y), estimated by YOLO multi-frame averaging right before departure.
 
-        실제 구현에서는:
+        In the real implementation:
           for _ in range(N): bbox = yolo.detect(frame); xyz = depth_deproj(bbox);
-          xy_world = T_world_cam @ xyz   →   평균
+          xy_world = T_world_cam @ xyz   →   average
         """
         c = self.cfg
         if c.phase1_noise_std <= 0 or c.phase1_avg_frames <= 1:
             return c.phase1_target
 
-        # 다중 프레임 평균 시뮬레이션
+        # multi-frame averaging simulation
         samples = np.array([
             (c.phase1_target[0] + self._rng.normal(0, c.phase1_noise_std),
              c.phase1_target[1] + self._rng.normal(0, c.phase1_noise_std))
@@ -127,12 +130,12 @@ class DummyTargetProvider:
     # ── Phase 2 ──
     def get_phase2_target(self) -> Tuple[float, float, float]:
         """
-        플레이트 중심 기준 종까지의 3D 벡터 (매 호출 시 z 진동 jitter 적용).
+        3D vector to the bell relative to the plate center (z oscillation jitter applied on each call).
 
-        실제 구현에서는:
+        In the real implementation:
           bbox  = yolo.detect(frame_after_tilt)
           xyz_c = depth_deproject(bbox)
-          xyz_p = T_plate_cam @ xyz_c        # 카메라 → 플레이트 외부 변환
+          xyz_p = T_plate_cam @ xyz_c        # camera → plate extrinsic transform
         """
         c = self.cfg
         x, y, z = c.phase2_target

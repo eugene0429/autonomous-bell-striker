@@ -197,8 +197,9 @@ class VisualServoPhase1Driver:
                 return False
 
             if is_real:
-                # Anchored rate-limit: 다음 tick은 loop_start + (step+1)*dt.
-                # YOLO 추론이 길어 deadline을 넘으면 sleep을 건너뛰고 best-effort.
+                # Anchored rate-limit: the next tick is loop_start + (step+1)*dt.
+                # If YOLO inference runs long and overruns the deadline, skip the
+                # sleep and proceed best-effort.
                 next_tick = loop_start + (step + 1) * self.dt
                 sleep_s = next_tick - time.monotonic()
                 if sleep_s > 0:

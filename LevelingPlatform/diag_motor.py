@@ -1,17 +1,17 @@
 """
-레벨링 모터 진단 — AIM 명령 전후 STATUS 비교.
+Leveling motor diagnostic — compare STATUS before and after an AIM command.
 
-GUI 를 닫고 단독으로 실행:
+Close the GUI and run standalone:
     python LevelingPlatform/diag_motor.py --port /dev/cu.usbmodem11301
 
-각 단계에서 모터 실제 위치를 출력해, "AIM 이 OK 라고 응답해도 실제로
-모터가 이동했는가" 를 확인한다.
+At each step it prints the actual motor position to verify "even when AIM
+responds OK, did the motor actually move?".
 
-해석
+Interpretation
 ----
-- 목표 step 과 STATUS 의 step 이 같으면 → 모터 정상 도달
-- STATUS step 이 시작 위치 그대로 → 모터 토크 없음 / HW 에러 / 정지
-- STATUS step 이 중간 위치 → 부분 이동, 시간 부족
+- Target step equals the STATUS step → motor reached normally
+- STATUS step unchanged from the start position → no motor torque / HW error / stalled
+- STATUS step at an intermediate position → partial motion, insufficient time
 """
 from __future__ import annotations
 
@@ -100,7 +100,7 @@ def try_aim(mc, label, s1, s2, s3):
 
 
 def try_aimf(mc, label, s1, s2, s3, settle_ms=600):
-    """단발 AIMF — 한 번 보내고 충분히 대기 후 STATUS."""
+    """Single AIMF — send once, wait long enough, then STATUS."""
     print(f"\n── {label}: AIMF {s1} {s2} {s3} (single, wait {settle_ms}ms) ──")
     print("  [before]"); st0 = query_status(mc)
     t0 = time.monotonic()
@@ -117,7 +117,7 @@ def try_aimf(mc, label, s1, s2, s3, settle_ms=600):
 
 
 def try_aimf_stream(mc, label, waypoints, period_ms=80, settle_ms=800):
-    """연속 AIMF 스트림 — GUI 드래그와 동일한 패턴."""
+    """Continuous AIMF stream — same pattern as GUI dragging."""
     print(f"\n── {label}: AIMF stream "
           f"({len(waypoints)} pts @ {period_ms}ms) ──")
     print("  [before]"); st0 = query_status(mc)
@@ -141,7 +141,7 @@ def main():
     ap.add_argument("--port", required=True)
     ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--no-home", action="store_true",
-                    help="HOME 건너뜀 (현재 위치에서 진단)")
+                    help="skip HOME (diagnose from current position)")
     args = ap.parse_args()
 
     cfg = MotorClientConfig(port=args.port, baud=args.baud, verbose=False)
@@ -153,7 +153,7 @@ def main():
         print("=" * 60)
 
         if not mc.ping():
-            print("PING 실패")
+            print("PING failed")
             return 2
         print("PING ok")
 
@@ -166,25 +166,25 @@ def main():
                 mc.home()
                 print(f"  HOME OK ({(time.monotonic()-t0)*1000:.0f} ms)")
             except (MotorProtocolError, MotorTimeoutError) as e:
-                print(f"  HOME 실패: {e}")
+                print(f"  HOME failed: {e}")
                 return 2
             print("  [after HOME]"); query_status(mc)
 
-        # ── Phase A: AIM (블로킹) ───────────────────────────────
+        # ── Phase A: AIM (blocking) ───────────────────────────────
         print("\n" + "▼" * 30 + "  Phase A: AIM (blocking)  " + "▼" * 30)
         try_aim(mc, "AIM small",     50,   50,  50)
         try_aim(mc, "AIM medium",   200,  200, 200)
         try_aim(mc, "AIM asymmetric", 200, -300, 150)
         try_aim(mc, "AIM back to 0",   0,    0,   0)
 
-        # ── Phase B: 단발 AIMF (블로킹과 동일 결과여야 함) ──────
+        # ── Phase B: single AIMF (should give the same result as blocking) ──────
         print("\n" + "▼" * 30 + "  Phase B: AIMF (single)  " + "▼" * 30)
         try_aimf(mc, "AIMF single small",  100, 100, 100)
         try_aimf(mc, "AIMF single medium", 250, -200, 150)
         try_aimf(mc, "AIMF back to 0",       0,    0,   0)
 
-        # ── Phase C: AIMF 스트림 (GUI 드래그 흉내) ──────────────
-        # 작은 step 변화 (GUI 와 유사한 패턴: 70→13→-50→-30→78→148)
+        # ── Phase C: AIMF stream (mimics GUI dragging) ──────────────
+        # Small step changes (pattern similar to GUI: 70→13→-50→-30→78→148)
         stream_small = [
             ( 70, -84,  14),
             ( 67, -89,  22),
@@ -203,7 +203,7 @@ def main():
         try_aimf_stream(mc, "AIMF small drag (80ms)",  stream_small, period_ms=80)
         try_aimf_stream(mc, "AIMF fast drag (30ms)",   stream_small, period_ms=30)
 
-        # ── Phase D: AIMF 스트림 큰 step (확실히 보이게) ────────
+        # ── Phase D: AIMF stream with large steps (so motion is clearly visible) ────────
         stream_big = [
             (  0,    0,    0),
             (200,  200,  200),
@@ -214,12 +214,12 @@ def main():
         try_aimf_stream(mc, "AIMF big drag (80ms)", stream_big, period_ms=80)
 
         print("\n" + "=" * 60)
-        print("진단 완료.")
-        print("해석:")
-        print("  Phase A (AIM)  : 100% achieved 면 모터 정상")
-        print("  Phase B (AIMF 단발) : AIM 과 같아야 함. 다르면 AIMF 핸들러 자체 문제")
-        print("  Phase C (AIMF 스트림) : 마지막 target 에 도달했어야 함.")
-        print("       Δ가 작거나 0이면 스트림 모드에서 motor가 정체됨")
+        print("Diagnostic complete.")
+        print("Interpretation:")
+        print("  Phase A (AIM)  : 100% achieved means the motor is normal")
+        print("  Phase B (AIMF single) : should match AIM. If different, the AIMF handler itself is the problem")
+        print("  Phase C (AIMF stream) : should have reached the final target.")
+        print("       If Δ is small or 0, the motor stalls in stream mode")
         print("=" * 60)
         return 0
     finally:

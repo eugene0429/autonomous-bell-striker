@@ -1,8 +1,8 @@
 """
 Tank-style Vehicle 2D Navigation Simulation
-- 잔디 환경에서 목표 지점(x, y)으로 주행하는 탱크 방식 로버 시뮬레이션
-- SLAM 위치 추정 오차 모델링 + 외란(disturbance) 모델링 포함
-- 목표: 특정 오차 범위 내 도달
+- Tank-style rover simulation that drives to a target point (x, y) on grass terrain
+- Includes SLAM position estimation error modeling + disturbance modeling
+- Goal: reach the target within a specified error tolerance
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Tuple, List
 import time
 
-# macOS 한글 폰트 설정
+# macOS Korean font configuration
 matplotlib.rcParams['font.family'] = 'AppleGothic'
 matplotlib.rcParams['axes.unicode_minus'] = False
 
@@ -24,67 +24,67 @@ matplotlib.rcParams['axes.unicode_minus'] = False
 # ──────────────────────────────────────────────
 @dataclass
 class SimConfig:
-    # 시뮬레이션
-    dt: float = 0.067           # 시간 스텝 (s) - 15Hz (Pi5 + D435i SLAM 기준)
-    max_time: float = 60.0      # 최대 시뮬레이션 시간 (s)
+    # Simulation
+    dt: float = 0.067           # Time step (s) - 15Hz (based on Pi5 + D435i SLAM)
+    max_time: float = 60.0      # Maximum simulation time (s)
 
-    # 로버 물리 파라미터
-    wheel_base: float = 0.3     # 좌우 바퀴 간격 (m)
-    max_speed: float = 0.3      # 최대 선속도 (m/s)
-    max_omega: float = 1.0      # 최대 각속도 (rad/s)
+    # Rover physical parameters
+    wheel_base: float = 0.3     # Distance between left/right wheels (m)
+    max_speed: float = 0.3      # Maximum linear velocity (m/s)
+    max_omega: float = 1.0      # Maximum angular velocity (rad/s)
 
-    # 목표 지점
+    # Target point
     target_x: float = 5.0
     target_y: float = 4.0
-    goal_tolerance: float = 0.3  # 목표 도달 판정 반경 (m)
+    goal_tolerance: float = 0.3  # Goal-reached decision radius (m)
 
-    # 시작 위치
+    # Start position
     start_x: float = 0.0
     start_y: float = 0.0
     start_theta: float = 0.0    # rad
 
-    # 외란 (잔디 환경)
-    disturbance_v_std: float = 0.08      # 선속도 외란 표준편차 (m/s)
-    disturbance_omega_std: float = 0.15  # 각속도 외란 표준편차 (rad/s)
-    slip_factor_mean: float = 0.90       # 잔디 슬립 (평균 90% 전달)
-    slip_factor_std: float = 0.05        # 슬립 변동
+    # Disturbance (grass terrain)
+    disturbance_v_std: float = 0.08      # Linear-velocity disturbance standard deviation (m/s)
+    disturbance_omega_std: float = 0.15  # Angular-velocity disturbance standard deviation (rad/s)
+    slip_factor_mean: float = 0.90       # Grass slip (mean 90% transmission)
+    slip_factor_std: float = 0.05        # Slip variation
 
-    # SLAM 오차 모델
-    slam_noise_xy_std: float = 0.03      # 위치 측정 가우시안 노이즈 (m) - SLAM은 맵 최적화로 VIO보다 낮음
-    slam_noise_theta_std: float = 0.015  # 헤딩 측정 노이즈 (rad)
-    slam_drift_rate: float = 0.003       # 드리프트 누적 속도 (m/s) - 맵 기반 보정으로 VIO보다 느림
-    slam_drift_theta_rate: float = 0.001 # 헤딩 드리프트 속도 (rad/s)
+    # SLAM error model
+    slam_noise_xy_std: float = 0.03      # Position-measurement Gaussian noise (m) - SLAM is lower than VIO due to map optimization
+    slam_noise_theta_std: float = 0.015  # Heading-measurement noise (rad)
+    slam_drift_rate: float = 0.003       # Drift accumulation rate (m/s) - slower than VIO due to map-based correction
+    slam_drift_theta_rate: float = 0.001 # Heading drift rate (rad/s)
 
-    # SLAM relocalization 실패
-    slam_reloc_failure_prob: float = 0.01      # relocalization 실패 확률 (특징점 부족 등)
-    slam_reloc_failure_noise: float = 0.3      # 실패 시 위치 오차 크기 (m)
+    # SLAM relocalization failure
+    slam_reloc_failure_prob: float = 0.01      # Relocalization failure probability (e.g. insufficient feature points)
+    slam_reloc_failure_noise: float = 0.3      # Position error magnitude on failure (m)
 
-    # SLAM 신뢰도 필터
-    slam_jump_threshold: float = 0.5   # 한 스텝에 이 이상 점프하면 outlier (m)
-    slam_jump_theta_threshold: float = 0.3  # 헤딩 점프 threshold (rad, ~17°)
-    slam_lowconf_speed_scale: float = 0.3   # 신뢰도 낮을 때 속도 배율
-    slam_reject_holdoff: int = 3       # outlier 감지 후 무시할 프레임 수
+    # SLAM confidence filter
+    slam_jump_threshold: float = 0.5   # Jump larger than this in one step is an outlier (m)
+    slam_jump_theta_threshold: float = 0.3  # Heading jump threshold (rad, ~17°)
+    slam_lowconf_speed_scale: float = 0.3   # Speed scale when confidence is low
+    slam_reject_holdoff: int = 3       # Number of frames to ignore after outlier detection
 
-    # 시리얼 통신 (Pi → OpenRB)
-    serial_rate_hz: float = 15.0      # 명령 전송 주기 (Hz)
-    cmd_v_deadzone: float = 0.02      # 이 이하 선속도는 0으로 처리 (m/s)
-    cmd_omega_deadzone: float = 0.05  # 이 이하 각속도는 0으로 처리 (rad/s)
-    cmd_v_resolution: float = 0.01    # 선속도 양자화 단위 (m/s)
-    cmd_omega_resolution: float = 0.01  # 각속도 양자화 단위 (rad/s)
+    # Serial communication (Pi → OpenRB)
+    serial_rate_hz: float = 15.0      # Command transmission rate (Hz)
+    cmd_v_deadzone: float = 0.02      # Linear velocity below this is treated as 0 (m/s)
+    cmd_omega_deadzone: float = 0.05  # Angular velocity below this is treated as 0 (rad/s)
+    cmd_v_resolution: float = 0.01    # Linear-velocity quantization unit (m/s)
+    cmd_omega_resolution: float = 0.01  # Angular-velocity quantization unit (rad/s)
 
-    # 제어기 게인
-    kp_linear: float = 0.8       # 거리 비례 게인
-    kp_angular: float = 2.5      # 각도 비례 게인
-    ki_angular: float = 0.1      # 각도 적분 게인
-    kd_angular: float = 0.3      # 각도 미분 게인
-    slowdown_radius: float = 1.0 # 감속 시작 반경 (m)
+    # Controller gains
+    kp_linear: float = 0.8       # Distance proportional gain
+    kp_angular: float = 2.5      # Angle proportional gain
+    ki_angular: float = 0.1      # Angle integral gain
+    kd_angular: float = 0.3      # Angle derivative gain
+    slowdown_radius: float = 1.0 # Deceleration onset radius (m)
 
 
 # ──────────────────────────────────────────────
 # Vehicle Model (Tank / Differential Drive)
 # ──────────────────────────────────────────────
 class TankVehicle:
-    """탱크 방식(차동 구동) 로버 모델"""
+    """Tank-style (differential drive) rover model"""
 
     def __init__(self, x: float, y: float, theta: float, wheel_base: float):
         self.x = x
@@ -95,8 +95,8 @@ class TankVehicle:
     def update(self, v_cmd: float, omega_cmd: float, dt: float,
                disturbance: 'DisturbanceModel') -> Tuple[float, float]:
         """
-        제어 명령(v, omega)을 받아 실제 위치를 업데이트.
-        외란이 적용된 실제 동작을 반영.
+        Receive control commands (v, omega) and update the actual position.
+        Reflects the actual motion with disturbance applied.
         """
         v_actual, omega_actual = disturbance.apply(v_cmd, omega_cmd)
 
@@ -117,14 +117,14 @@ class TankVehicle:
 
 
 # ──────────────────────────────────────────────
-# Disturbance Model (잔디 환경 외란)
+# Disturbance Model (grass terrain disturbance)
 # ──────────────────────────────────────────────
 class DisturbanceModel:
     """
-    잔디 환경에서의 외란 모델링:
-    - 바퀴 슬립 (잔디 위에서 구동력 손실)
-    - 가우시안 노이즈 (불규칙 지형)
-    - 방향 교란 (풀, 돌멩이 등)
+    Disturbance modeling on grass terrain:
+    - Wheel slip (loss of traction on grass)
+    - Gaussian noise (irregular terrain)
+    - Directional disturbance (grass, pebbles, etc.)
     """
 
     def __init__(self, cfg: SimConfig):
@@ -133,15 +133,15 @@ class DisturbanceModel:
     def apply(self, v_cmd: float, omega_cmd: float) -> Tuple[float, float]:
         c = self.cfg
 
-        # 슬립: 잔디에서 바퀴가 미끄러져 명령 대비 실제 속도 감소
+        # Slip: wheels slip on grass, reducing actual speed relative to command
         slip = np.random.normal(c.slip_factor_mean, c.slip_factor_std)
         slip = np.clip(slip, 0.7, 1.0)
 
-        # 선속도 외란
+        # Linear-velocity disturbance
         v_noise = np.random.normal(0, c.disturbance_v_std)
         v_actual = v_cmd * slip + v_noise
 
-        # 각속도 외란 (좌우 바퀴 슬립 차이로 인한 방향 교란)
+        # Angular-velocity disturbance (directional disturbance from left/right wheel slip difference)
         omega_noise = np.random.normal(0, c.disturbance_omega_std)
         omega_actual = omega_cmd * slip + omega_noise
 
@@ -149,14 +149,14 @@ class DisturbanceModel:
 
 
 # ──────────────────────────────────────────────
-# SLAM Error Model (SLAM 측위 오차)
+# SLAM Error Model (SLAM positioning error)
 # ──────────────────────────────────────────────
 class SLAMModel:
     """
-    SLAM 위치 추정 오차 모델:
-    - 가우시안 측정 노이즈 (맵 최적화로 VIO 대비 낮음)
-    - 시간에 따라 누적되는 드리프트 (맵 기반 보정으로 느리게 누적)
-    - relocalization 실패 시 큰 위치 오차 발생
+    SLAM position estimation error model:
+    - Gaussian measurement noise (lower than VIO due to map optimization)
+    - Drift accumulating over time (accumulates slowly due to map-based correction)
+    - Large position error occurs on relocalization failure
     """
 
     def __init__(self, cfg: SimConfig):
@@ -170,17 +170,17 @@ class SLAMModel:
                  dt: float) -> Tuple[float, float, float]:
         c = self.cfg
         self.time_elapsed += dt
-        # 드리프트 누적 (랜덤 워크)
+        # Drift accumulation (random walk)
         self.drift_x += np.random.normal(0, c.slam_drift_rate * dt)
         self.drift_y += np.random.normal(0, c.slam_drift_rate * dt)
         self.drift_theta += np.random.normal(0, c.slam_drift_theta_rate * dt)
 
-        # 측정 노이즈
+        # Measurement noise
         noise_x = np.random.normal(0, c.slam_noise_xy_std)
         noise_y = np.random.normal(0, c.slam_noise_xy_std)
         noise_theta = np.random.normal(0, c.slam_noise_theta_std)
 
-        # Relocalization 실패: 특징점 부족 등으로 큰 위치 오차 발생
+        # Relocalization failure: large position error from insufficient feature points, etc.
         if np.random.random() < c.slam_reloc_failure_prob:
             noise_x += np.random.normal(0, c.slam_reloc_failure_noise)
             noise_y += np.random.normal(0, c.slam_reloc_failure_noise)
@@ -197,30 +197,30 @@ class SLAMModel:
 
 
 # ──────────────────────────────────────────────
-# SLAM Confidence Filter (이상치 제거 + 신뢰도 판정)
+# SLAM Confidence Filter (outlier rejection + confidence evaluation)
 # ──────────────────────────────────────────────
 class SLAMFilter:
     """
-    SLAM 추정값의 이상치를 걸러내고 신뢰도를 판정.
-    - 한 스텝에 비현실적으로 큰 위치 점프 → reject (이전 값 유지)
-    - reject 연속 발생 시 신뢰도 저하 → 제어기에 감속 신호
-    - 실제 로버에서는 이 필터가 SLAM raw 출력과 제어기 사이에 위치
+    Filter out outliers in SLAM estimates and evaluate confidence.
+    - Unrealistically large position jump in one step → reject (keep previous value)
+    - Confidence drops on consecutive rejects → deceleration signal to the controller
+    - On a real rover, this filter sits between the SLAM raw output and the controller
     """
 
-    MAX_CONSECUTIVE_REJECTS = 10  # 이 이상 연속 reject 시 강제 수용 (reset)
+    MAX_CONSECUTIVE_REJECTS = 10  # Force acceptance after this many consecutive rejects (reset)
 
     def __init__(self, cfg: SimConfig):
         self.cfg = cfg
-        self.prev_est = None          # 이전 필터 출력 (x, y, theta)
-        self.reject_count = 0         # 연속 reject 횟수
-        self.holdoff_remaining = 0    # reject 후 남은 holdoff 프레임
-        self.confidence = 1.0         # 0.0 ~ 1.0 신뢰도
-        self.total_rejects = 0        # 누적 reject 횟수 (로그용)
+        self.prev_est = None          # Previous filter output (x, y, theta)
+        self.reject_count = 0         # Consecutive reject count
+        self.holdoff_remaining = 0    # Remaining holdoff frames after reject
+        self.confidence = 1.0         # 0.0 ~ 1.0 confidence
+        self.total_rejects = 0        # Cumulative reject count (for logging)
 
     def update(self, raw_x: float, raw_y: float, raw_theta: float,
                dt: float) -> Tuple[float, float, float, float]:
         """
-        SLAM raw 추정값을 ���터링.
+        Filter the SLAM raw estimate.
         Returns: (filtered_x, filtered_y, filtered_theta, confidence)
         """
         c = self.cfg
@@ -232,39 +232,39 @@ class SLAMFilter:
 
         px, py, pt = self.prev_est
 
-        # 연속 reject가 너무 많으면 강제 수용 (로버가 이동해서 frozen 위치와 괴리)
+        # Too many consecutive rejects → force acceptance (rover has moved, diverging from the frozen position)
         if self.reject_count >= self.MAX_CONSECUTIVE_REJECTS:
             self.prev_est = (raw_x, raw_y, raw_theta)
             self.reject_count = 0
             self.holdoff_remaining = 0
-            self.confidence = 0.3  # 낮은 신뢰도로 재시작
+            self.confidence = 0.3  # Restart with low confidence
             return raw_x, raw_y, raw_theta, self.confidence
 
-        # 위치 점프 크기 계산
+        # Compute position jump magnitude
         jump_xy = np.sqrt((raw_x - px)**2 + (raw_y - py)**2)
         jump_theta = abs(((raw_theta - pt) + np.pi) % (2 * np.pi) - np.pi)
 
-        # 물리적으로 가능한 최대 이동: max_speed * dt * 안전 마진
+        # Physically possible maximum movement: max_speed * dt * safety margin
         max_possible_jump = c.max_speed * dt * 3.0
 
         is_outlier = (jump_xy > max(c.slam_jump_threshold, max_possible_jump) or
                       jump_theta > c.slam_jump_theta_threshold)
 
         if is_outlier or self.holdoff_remaining > 0:
-            # Outlier → 이전 값 유지
+            # Outlier → keep previous value
             if is_outlier:
                 self.reject_count += 1
                 self.total_rejects += 1
                 self.holdoff_remaining = c.slam_reject_holdoff
             self.holdoff_remaining = max(0, self.holdoff_remaining - 1)
 
-            # 신뢰도 감소
+            # Reduce confidence
             self.confidence = max(0.1, self.confidence - 0.2)
 
-            # 이전 값 유지 (dead reckoning 느낌)
+            # Keep previous value (dead-reckoning-like behavior)
             return px, py, pt, self.confidence
         else:
-            # 정상 → 값 수용, 신뢰도 회복
+            # Normal → accept value, recover confidence
             self.reject_count = 0
             self.confidence = min(1.0, self.confidence + 0.05)
             self.prev_est = (raw_x, raw_y, raw_theta)
@@ -272,21 +272,21 @@ class SLAMFilter:
 
 
 # ──────────────────────────────────────────────
-# Serial Command Protocol (Pi → OpenRB 시뮬레이션)
+# Serial Command Protocol (Pi → OpenRB simulation)
 # ──────────────────────────────────────────────
 class SerialCommandSim:
     """
-    Pi5 → OpenRB 시리얼 통신 시뮬레이션.
-    실제 구현 시 참고할 프로토콜:
-      패킷: [0xFF][0xFE][v_high][v_low][omega_high][omega_low][checksum]
-      - v, omega: signed int16, 단위 mm/s, mrad/s
+    Pi5 → OpenRB serial communication simulation.
+    Protocol to reference for the real implementation:
+      Packet: [0xFF][0xFE][v_high][v_low][omega_high][omega_low][checksum]
+      - v, omega: signed int16, units mm/s, mrad/s
       - checksum: XOR of payload bytes
 
-    시뮬레이션에서는:
-    - 전송 주기 제한 (serial_rate_hz)
-    - 데드존 처리 (모터 떨림 방지)
-    - 양자화 (실제 시리얼에서의 정수 변환 반영)
-    - rate limiting (급격한 명령 변화 완화)
+    In the simulation:
+    - Transmission rate limit (serial_rate_hz)
+    - Dead-zone handling (prevents motor chatter)
+    - Quantization (reflects integer conversion in real serial)
+    - Rate limiting (smooths abrupt command changes)
     """
 
     def __init__(self, cfg: SimConfig):
@@ -300,26 +300,26 @@ class SerialCommandSim:
     def process(self, v_cmd: float, omega_cmd: float,
                 dt: float) -> Tuple[float, float, bool]:
         """
-        제어기 출력을 시리얼 전송용으로 변환.
+        Convert controller output for serial transmission.
         Returns: (processed_v, processed_omega, was_sent_this_step)
         """
         c = self.cfg
         self.time_since_send += dt
 
         if self.time_since_send < self.send_interval:
-            # 아직 전송 타이밍 아님 → 이전 명령 유지
+            # Not yet transmission time → keep previous command
             return self.last_sent_v, self.last_sent_omega, False
 
-        # 전송 타이밍 도달
+        # Transmission time reached
         self.time_since_send = 0.0
 
-        # 데드존 처리
+        # Dead-zone handling
         if abs(v_cmd) < c.cmd_v_deadzone:
             v_cmd = 0.0
         if abs(omega_cmd) < c.cmd_omega_deadzone:
             omega_cmd = 0.0
 
-        # 양자화 (시리얼 int16 변환 시뮬레이션)
+        # Quantization (serial int16 conversion simulation)
         v_cmd = round(v_cmd / c.cmd_v_resolution) * c.cmd_v_resolution
         omega_cmd = round(omega_cmd / c.cmd_omega_resolution) * c.cmd_omega_resolution
 
@@ -331,8 +331,8 @@ class SerialCommandSim:
 
     def build_packet(self, v: float, omega: float) -> bytes:
         """
-        실제 OpenRB로 보낼 바이트 패킷 생성 (참고용).
-        실제 로버 코드에서 이 형식으로 serial.write() 호출.
+        Build the byte packet to send to the real OpenRB (for reference).
+        Real rover code calls serial.write() in this format.
         """
         v_int = int(np.clip(v * 1000, -32768, 32767))     # mm/s
         omega_int = int(np.clip(omega * 1000, -32768, 32767))  # mrad/s
@@ -347,13 +347,13 @@ class SerialCommandSim:
 
 
 # ──────────────────────────────────────────────
-# Navigation Controller (PID 기반)
+# Navigation Controller (PID based)
 # ──────────────────────────────────────────────
 class NavigationController:
     """
-    SLAM 추정 위치 기반으로 목표 지점까지 주행하는 제어기.
-    - 거리 비례 선속도 제어
-    - PID 각속도 제어
+    Controller that drives to the target point based on the SLAM-estimated position.
+    - Distance-proportional linear-velocity control
+    - PID angular-velocity control
     """
 
     def __init__(self, cfg: SimConfig):
@@ -371,11 +371,11 @@ class NavigationController:
         distance = np.sqrt(dx**2 + dy**2)
         desired_heading = np.arctan2(dy, dx)
 
-        # 헤딩 오차
+        # Heading error
         angle_error = desired_heading - est_theta
         angle_error = (angle_error + np.pi) % (2 * np.pi) - np.pi
 
-        # PID 각속도
+        # PID angular velocity
         self.integral_angle_error += angle_error * c.dt
         self.integral_angle_error = np.clip(self.integral_angle_error, -2.0, 2.0)
         derivative = (angle_error - self.prev_angle_error) / c.dt
@@ -386,13 +386,13 @@ class NavigationController:
                  c.kd_angular * derivative)
         omega = np.clip(omega, -c.max_omega, c.max_omega)
 
-        # 선속도: 거리 비례 + 감속 + 헤딩 오차 클 때 감속
+        # Linear velocity: distance-proportional + deceleration + decelerate on large heading error
         speed_factor = min(1.0, distance / c.slowdown_radius)
         heading_factor = max(0.2, 1.0 - abs(angle_error) / np.pi)
         v = c.kp_linear * distance * speed_factor * heading_factor
         v = np.clip(v, 0, c.max_speed)
 
-        # SLAM 신뢰도 기반 감속: confidence 낮으면 속도 줄임
+        # SLAM-confidence-based deceleration: reduce speed when confidence is low
         if slam_confidence < 0.8:
             conf_scale = c.slam_lowconf_speed_scale + (1.0 - c.slam_lowconf_speed_scale) * (slam_confidence / 0.8)
             v *= conf_scale
@@ -446,30 +446,30 @@ def run_simulation(cfg: SimConfig, seed: int = None) -> Tuple[SimLog, bool]:
     while t < cfg.max_time:
         true_x, true_y, true_theta = vehicle.state
 
-        # SLAM 위치 추정 (raw)
+        # SLAM position estimation (raw)
         est_x, est_y, est_theta = slam.estimate(true_x, true_y, true_theta, cfg.dt)
 
-        # SLAM 신뢰도 필터 (outlier rejection)
+        # SLAM confidence filter (outlier rejection)
         filt_x, filt_y, filt_theta, confidence = slam_filter.update(
             est_x, est_y, est_theta, cfg.dt)
 
-        # 제어 명령 계산 (필터링된 위치 + 신뢰도 기반 감속)
+        # Compute control command (filtered position + confidence-based deceleration)
         v_cmd, omega_cmd = controller.compute(filt_x, filt_y, filt_theta,
                                                cfg.target_x, cfg.target_y,
                                                slam_confidence=confidence)
 
-        # 시리얼 프로토콜 시뮬레이션 (데드존 + 양자화 + rate limiting)
+        # Serial protocol simulation (dead zone + quantization + rate limiting)
         v_serial, omega_serial, was_sent = serial_cmd.process(
             v_cmd, omega_cmd, cfg.dt)
 
-        # 차량 업데이트 (시리얼로 실제 전송된 명령 기준 + 외란 적용)
+        # Vehicle update (based on the command actually sent over serial + disturbance applied)
         v_actual, omega_actual = vehicle.update(
             v_serial, omega_serial, cfg.dt, disturbance)
 
-        # 실제 목표까지 거리
+        # Actual distance to the target
         dist = np.sqrt((true_x - cfg.target_x)**2 + (true_y - cfg.target_y)**2)
 
-        # 로그 기록
+        # Log recording
         log.time.append(t)
         log.true_x.append(true_x)
         log.true_y.append(true_y)
@@ -491,7 +491,7 @@ def run_simulation(cfg: SimConfig, seed: int = None) -> Tuple[SimLog, bool]:
         log.slam_drift_x.append(slam.drift_x)
         log.slam_drift_y.append(slam.drift_y)
 
-        # 목표 도달 판정 (실제 위치 기준)
+        # Goal-reached decision (based on actual position)
         if dist < cfg.goal_tolerance:
             reached = True
             break
@@ -512,7 +512,7 @@ def plot_results(log: SimLog, cfg: SimConfig, reached: bool):
     fig.suptitle('Tank Vehicle Navigation Simulation (Grass Terrain)',
                  fontsize=14, fontweight='bold')
 
-    # ── 1) 2D 경로 ──
+    # ── 1) 2D path ──
     ax1 = fig.add_subplot(3, 3, (1, 4))
     ax1.set_facecolor('#c8e6c9')
 
@@ -553,7 +553,7 @@ def plot_results(log: SimLog, cfg: SimConfig, reached: bool):
              horizontalalignment='right',
              bbox=dict(boxstyle='round', facecolor=status_color, alpha=0.3))
 
-    # ── 2) 목표까지 거리 ──
+    # ── 2) Distance to goal ──
     ax2 = fig.add_subplot(3, 3, 2)
     ax2.plot(log.time, log.distance_to_goal, 'b-', linewidth=1.2)
     ax2.axhline(y=cfg.goal_tolerance, color='r', linestyle='--',
@@ -564,7 +564,7 @@ def plot_results(log: SimLog, cfg: SimConfig, reached: bool):
     ax2.legend()
     ax2.grid(True, alpha=0.3)
 
-    # ── 3) 제어 → 시리얼 → 실제 (v) ──
+    # ── 3) Controller → serial → actual (v) ──
     ax3 = fig.add_subplot(3, 3, 3)
     ax3.plot(log.time, log.cmd_v, 'b-', label='Controller v', alpha=0.5, linewidth=0.8)
     ax3.plot(log.time, log.serial_v, 'g-', label='Serial v', alpha=0.8, linewidth=1.2)
@@ -575,7 +575,7 @@ def plot_results(log: SimLog, cfg: SimConfig, reached: bool):
     ax3.legend(fontsize=7)
     ax3.grid(True, alpha=0.3)
 
-    # ── 4) SLAM 드리프트 ──
+    # ── 4) SLAM drift ──
     ax4 = fig.add_subplot(3, 3, 5)
     ax4.plot(log.time, log.slam_drift_x, 'r-', label='Drift X')
     ax4.plot(log.time, log.slam_drift_y, 'g-', label='Drift Y')
@@ -588,7 +588,7 @@ def plot_results(log: SimLog, cfg: SimConfig, reached: bool):
     ax4.legend(fontsize=8)
     ax4.grid(True, alpha=0.3)
 
-    # ── 5) 위치 추정 오차 (raw vs filtered) ──
+    # ── 5) Position estimation error (raw vs filtered) ──
     ax5 = fig.add_subplot(3, 3, 6)
     raw_pos_error = [np.sqrt((tx - ex)**2 + (ty - ey)**2)
                      for tx, ex, ty, ey in
@@ -617,7 +617,7 @@ def plot_results(log: SimLog, cfg: SimConfig, reached: bool):
     ax6.legend(fontsize=8)
     ax6.grid(True, alpha=0.3)
 
-    # ── 7) 제어 → 시리얼 → 실제 (omega) ──
+    # ── 7) Controller → serial → actual (omega) ──
     ax7 = fig.add_subplot(3, 3, 8)
     ax7.plot(log.time, log.cmd_omega, 'r-', label='Controller ω', alpha=0.5, linewidth=0.8)
     ax7.plot(log.time, log.serial_omega, 'g-', label='Serial ω', alpha=0.8, linewidth=1.2)
@@ -628,7 +628,7 @@ def plot_results(log: SimLog, cfg: SimConfig, reached: bool):
     ax7.legend(fontsize=7)
     ax7.grid(True, alpha=0.3)
 
-    # ── 8) 헤딩 오차 ──
+    # ── 8) Heading error ──
     ax8 = fig.add_subplot(3, 3, 9)
     heading_error = [abs(((tt - et + np.pi) % (2 * np.pi)) - np.pi)
                      for tt, et in zip(log.true_theta, log.est_theta)]
@@ -651,10 +651,10 @@ def plot_results(log: SimLog, cfg: SimConfig, reached: bool):
 
 
 # ──────────────────────────────────────────────
-# Monte Carlo Analysis (다회 시뮬레이션)
+# Monte Carlo Analysis (multiple simulation runs)
 # ──────────────────────────────────────────────
 def monte_carlo(cfg: SimConfig, n_runs: int = 50):
-    """여러 번 시뮬레이션을 돌려 성공률과 최종 오차 분포 분석"""
+    """Run the simulation multiple times to analyze success rate and final error distribution"""
     final_errors = []
     success_count = 0
     arrival_times = []
@@ -682,7 +682,7 @@ def monte_carlo(cfg: SimConfig, n_runs: int = 50):
         print(f"Avg Arrival Time:  {np.mean(arrival_times):.2f} s")
     print(f"{'='*50}\n")
 
-    # 결과 시각화
+    # Result visualization
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     fig.suptitle(f'Monte Carlo Analysis ({n_runs} runs)', fontweight='bold')
 
@@ -715,13 +715,13 @@ def monte_carlo(cfg: SimConfig, n_runs: int = 50):
 # ──────────────────────────────────────────────
 def run_animation(cfg: SimConfig, seed: int = 42):
     """
-    인터랙티브 애니메이션 시뮬레이션.
-    1) 설정 화면: 좌클릭으로 출발 위치, 우클릭으로 목표 위치 지정
-    2) ▶ Play 버튼을 누르면 시뮬레이션 시작
+    Interactive animation simulation.
+    1) Setup screen: left-click to set start position, right-click to set target position
+    2) Press the ▶ Play button to start the simulation
     """
     from matplotlib.widgets import Button
 
-    # ── 1단계: 인터랙티브 설정 화면 ──
+    # ── Step 1: interactive setup screen ──
     fig, ax = plt.subplots(1, 1, figsize=(10, 8))
     plt.subplots_adjust(bottom=0.15)
 
@@ -793,15 +793,15 @@ def run_animation(cfg: SimConfig, seed: int = 42):
 
     draw_setup()
 
-    # Play 버튼이 눌릴 때까지 대기
+    # Wait until the Play button is pressed
     while not state['running']:
         plt.pause(0.1)
         if not plt.fignum_exists(fig.number):
-            return  # 창이 닫히면 종료
+            return  # Exit if the window is closed
 
     fig.canvas.mpl_disconnect(cid)
 
-    # ── 2단계: 시뮬레이션 실행 ──
+    # ── Step 2: run the simulation ──
     sx, sy = state['start']
     tx, ty = state['target']
     cfg.start_x, cfg.start_y = sx, sy
@@ -815,7 +815,7 @@ def run_animation(cfg: SimConfig, seed: int = 42):
     serial_cmd = SerialCommandSim(cfg)
     controller = NavigationController(cfg)
 
-    # Play 버튼 숨기기
+    # Hide the Play button
     ax_btn.set_visible(False)
 
     true_path_x, true_path_y = [], []
@@ -824,7 +824,7 @@ def run_animation(cfg: SimConfig, seed: int = 42):
     t = 0.0
     while t < cfg.max_time:
         if not plt.fignum_exists(fig.number):
-            return  # 창이 닫히면 종료
+            return  # Exit if the window is closed
 
         true_x, true_y, true_theta = vehicle.state
         est_x, est_y, est_theta = slam.estimate(true_x, true_y, true_theta, cfg.dt)
@@ -843,7 +843,7 @@ def run_animation(cfg: SimConfig, seed: int = 42):
 
         dist = np.sqrt((true_x - cfg.target_x)**2 + (true_y - cfg.target_y)**2)
 
-        # 매 5프레임마다 화면 갱신
+        # Refresh the screen every 5 frames
         if int(t / cfg.dt) % 5 == 0:
             ax.clear()
             ax.set_facecolor('#c8e6c9')
@@ -851,7 +851,7 @@ def run_animation(cfg: SimConfig, seed: int = 42):
             ax.plot(true_path_x, true_path_y, 'b-', linewidth=1.5, label='True')
             ax.plot(est_path_x, est_path_y, 'r--', linewidth=1.0, label='SLAM Est.', alpha=0.6)
 
-            # 로버 표시
+            # Draw the rover
             rover_size = 0.15
             corners = np.array([[-rover_size, -rover_size/2],
                                 [rover_size, -rover_size/2],
@@ -864,7 +864,7 @@ def run_animation(cfg: SimConfig, seed: int = 42):
                                        edgecolor='black', alpha=0.8, zorder=10)
             ax.add_patch(rover_patch)
 
-            # 방향 화살표
+            # Direction arrow
             arrow_len = 0.25
             ax.annotate('', xy=(true_x + arrow_len * np.cos(true_theta),
                                 true_y + arrow_len * np.sin(true_theta)),
@@ -872,7 +872,7 @@ def run_animation(cfg: SimConfig, seed: int = 42):
                         arrowprops=dict(arrowstyle='->', color='yellow', lw=2),
                         zorder=11)
 
-            # 목표
+            # Target
             goal_circle = plt.Circle((cfg.target_x, cfg.target_y), cfg.goal_tolerance,
                                       color='red', fill=False, linewidth=2, linestyle='--')
             ax.add_patch(goal_circle)

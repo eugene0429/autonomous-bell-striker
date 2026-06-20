@@ -1,46 +1,46 @@
 # Raspberry Pi 5 Deployment Guide
 
-Perception 프로젝트(ORB-SLAM3 + Python VIO)를 Raspberry Pi 5에 배포하는 가이드.
+Guide for deploying the Perception project (ORB-SLAM3 + Python VIO) to a Raspberry Pi 5.
 
-## 전체 구조
+## Overall structure
 
-Pi에 배포해야 하는 것은 크게 두 가지:
+There are two main things that need to be deployed to the Pi:
 
-1. **ORB-SLAM3** (C++ 바이너리) - Pi에서 직접 빌드 필요
-2. **perception** (Python 프로젝트) - 그대로 복사 후 경로만 수정
+1. **ORB-SLAM3** (C++ binary) - must be built directly on the Pi
+2. **perception** (Python project) - copy as-is, then only fix paths
 
 ```
-~/perception/          # Python 프로젝트
-~/ORB_SLAM3/           # ORB-SLAM3 (Pi에서 빌드)
+~/perception/          # Python project
+~/ORB_SLAM3/           # ORB-SLAM3 (built on the Pi)
 ```
 
 ---
 
-## 1단계: Pi 기본 환경 설정
+## Step 1: Pi base environment setup
 
 ### OS
 - **Ubuntu 24.04 LTS (Noble Numbat) 64-bit** for Raspberry Pi 5
-- 반드시 64-bit (aarch64) 사용
+- Must use 64-bit (aarch64)
 
-### 시스템 패키지 설치
+### Installing system packages
 
 ```bash
 sudo apt update && sudo apt upgrade -y
 
-# 빌드 도구
+# Build tools
 sudo apt install -y build-essential cmake git pkg-config
 
-# OpenCV 의존성
+# OpenCV dependencies
 sudo apt install -y libopencv-dev python3-opencv
 
 # Eigen3
 sudo apt install -y libeigen3-dev
 
-# Pangolin 의존성
+# Pangolin dependencies
 sudo apt install -y libgl1-mesa-dev libglew-dev libwayland-dev \
     libxkbcommon-dev wayland-protocols
 
-# Boost (ORB-SLAM3 직렬화용)
+# Boost (for ORB-SLAM3 serialization)
 sudo apt install -y libboost-serialization-dev libssl-dev
 
 # Python
@@ -50,36 +50,36 @@ sudo apt install -y python3-pip python3-venv python3-numpy
 sudo apt install -y libusb-1.0-0-dev
 ```
 
-### 스왑 확장 (빌드 OOM 방지)
+### Expanding swap (preventing build OOM)
 
-Pi5 4GB 모델은 빌드 중 메모리 부족할 수 있으므로 스왑을 늘린다 (8GB 모델은 생략 가능):
+The Pi5 4GB model may run out of memory during the build, so increase the swap (can be skipped on the 8GB model):
 
 ```bash
-# Ubuntu 24.04는 dphys-swapfile 대신 swapfile 직접 관리
-# 기존 스왑 비활성화
+# Ubuntu 24.04 manages the swapfile directly instead of dphys-swapfile
+# Disable existing swap
 sudo swapoff -a
 
-# 2GB 스왑 파일 생성
+# Create a 2GB swap file
 sudo fallocate -l 2G /swapfile
 sudo chmod 600 /swapfile
 sudo mkswap /swapfile
 sudo swapon /swapfile
 
-# 재부팅 후에도 유지
+# Persist across reboots
 echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 
-free -h  # 확인
+free -h  # verify
 ```
 
-### RealSense SDK 설치 (Pi용 소스 빌드)
+### Installing the RealSense SDK (source build for the Pi)
 
-Pi에서는 apt 패키지가 없으므로 소스 빌드 필요:
+There is no apt package on the Pi, so a source build is required:
 
 ```bash
 cd ~
 git clone https://github.com/IntelRealSense/librealsense.git
 cd librealsense
-git checkout v2.55.1  # 안정 버전
+git checkout v2.55.1  # stable version
 
 mkdir build && cd build
 cmake .. \
@@ -89,12 +89,12 @@ cmake .. \
     -DBUILD_PYTHON_BINDINGS:bool=true \
     -DPYTHON_EXECUTABLE=$(which python3) \
     -DFORCE_RSUSB_BACKEND=true
-make -j4   # Pi5는 -j4 사용 가능
+make -j4   # Pi5 can use -j4
 sudo make install
 sudo ldconfig
 ```
 
-udev 규칙 설치 (카메라 접근 권한):
+Install the udev rules (camera access permissions):
 ```bash
 cd ~/librealsense
 sudo cp config/99-realsense-libusb.rules /etc/udev/rules.d/
@@ -103,26 +103,26 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 
 ---
 
-## 2단계: ORB-SLAM3 수정 파일 전송 및 빌드
+## Step 2: Transferring and building the modified ORB-SLAM3 files
 
-### 2-1. 수정된 파일 목록
+### 2-1. List of modified files
 
-데스크탑 ORB-SLAM3(`/home/sim2real1/WALJU/deps/ORB_SLAM3`)에서 **직접 수정한 파일들**:
+**Files modified directly** in the desktop ORB-SLAM3 (`/home/sim2real1/WALJU/deps/ORB_SLAM3`):
 
-| 파일 | 설명 |
+| File | Description |
 |------|------|
-| `Examples/RGB-D/rgbd_realsense_D435i.cc` | RGB-D 모드 - 프레임 출력, 캘리브 오버라이드, YAML 해상도/FPS 읽기 |
-| `Examples/RGB-D/RealSense_D435i.yaml` | RGB-D 설정 (640x480@30fps) |
-| `Examples/RGB-D/RealSense_D435i_pi.yaml` | **Pi 최적화 설정** (424x240@15fps, 500 features, 4 levels) |
-| `Examples/RGB-D-Inertial/rgbd_inertial_realsense_D435i.cc` | RGB-D+IMU 모드 - 동일한 수정 적용 |
-| `Examples/RGB-D-Inertial/RealSense_D435i.yaml` | RGB-D-Inertial 설정 |
+| `Examples/RGB-D/rgbd_realsense_D435i.cc` | RGB-D mode - frame output, calibration override, reads resolution/FPS from YAML |
+| `Examples/RGB-D/RealSense_D435i.yaml` | RGB-D config (640x480@30fps) |
+| `Examples/RGB-D/RealSense_D435i_pi.yaml` | **Pi-optimized config** (424x240@15fps, 500 features, 4 levels) |
+| `Examples/RGB-D-Inertial/rgbd_inertial_realsense_D435i.cc` | RGB-D+IMU mode - same modifications applied |
+| `Examples/RGB-D-Inertial/RealSense_D435i.yaml` | RGB-D-Inertial config |
 
-### 2-2. 전체 소스 전송
+### 2-2. Transferring the full source
 
-ORB-SLAM3 전체를 Pi로 복사 (빌드 산출물 제외, Pi에서 다시 빌드해야 함):
+Copy the entire ORB-SLAM3 to the Pi (excluding build artifacts, must be rebuilt on the Pi):
 
 ```bash
-# 데스크탑에서 실행
+# Run on the desktop
 rsync -avz --progress \
     --exclude='build/' \
     --exclude='lib/*.so' \
@@ -140,7 +140,7 @@ rsync -avz --progress \
     pi@<PI_IP>:~/ORB_SLAM3/
 ```
 
-또는 **수정 파일만** 따로 보내려면 (ORB-SLAM3 원본이 Pi에 이미 있을 때):
+Or, to send **only the modified files** separately (when the original ORB-SLAM3 is already on the Pi):
 ```bash
 scp /home/sim2real1/WALJU/deps/ORB_SLAM3/Examples/RGB-D/rgbd_realsense_D435i.cc \
     /home/sim2real1/WALJU/deps/ORB_SLAM3/Examples/RGB-D/RealSense_D435i.yaml \
@@ -150,10 +150,10 @@ scp /home/sim2real1/WALJU/deps/ORB_SLAM3/Examples/RGB-D/rgbd_realsense_D435i.cc 
     pi@<PI_IP>:~/ORB_SLAM3_modified/
 ```
 
-### 2-3. Pangolin 빌드 (Pi)
+### 2-3. Building Pangolin (Pi)
 
 ```bash
-# Pi에서 실행
+# Run on the Pi
 cd ~
 git clone https://github.com/stevenlovegrove/Pangolin.git
 cd Pangolin
@@ -165,18 +165,18 @@ sudo make install
 sudo ldconfig
 ```
 
-### 2-4. ORB-SLAM3 빌드 (Pi)
+### 2-4. Building ORB-SLAM3 (Pi)
 
 ```bash
-# Pi에서 실행
+# Run on the Pi
 cd ~/ORB_SLAM3
 
-# 1) Vocabulary 압축 해제
+# 1) Decompress the Vocabulary
 cd Vocabulary
 tar -xf ORBvoc.txt.tar.gz
 cd ..
 
-# 2) Third-party 라이브러리 빌드
+# 2) Build the third-party libraries
 cd Thirdparty/DBoW2
 mkdir -p build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
@@ -194,16 +194,16 @@ make -j4
 
 cd ../../../
 
-# 3) ORB-SLAM3 메인 빌드
+# 3) Main ORB-SLAM3 build
 mkdir -p build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j3   # Pi5에서는 -j3~-j4 사용 가능 (8GB: -j4, 4GB: -j3)
+make -j3   # On the Pi5 you can use -j3~-j4 (8GB: -j4, 4GB: -j3)
 ```
 
-> **빌드 시간**: Pi5에서 전체 빌드 약 15~30분 소요 (Pi4 대비 약 2배 빠름).
-> `-march=native`가 CMakeLists.txt에 있으므로 Pi5의 ARM Cortex-A76에 맞게 자동 최적화됨.
+> **Build time**: A full build on the Pi5 takes about 15~30 minutes (roughly 2x faster than Pi4).
+> Since `-march=native` is in CMakeLists.txt, it is automatically optimized for the Pi5's ARM Cortex-A76.
 
-### 2-5. 빌드 확인
+### 2-5. Verifying the build
 
 ```bash
 ls -la ~/ORB_SLAM3/Examples/RGB-D/rgbd_realsense_D435i
@@ -213,12 +213,12 @@ ls -la ~/ORB_SLAM3/lib/libORB_SLAM3.so
 
 ---
 
-## 3단계: Python 프로젝트 전송
+## Step 3: Transferring the Python project
 
-### 3-1. perception 프로젝트 복사
+### 3-1. Copying the perception project
 
 ```bash
-# 데스크탑에서 실행
+# Run on the desktop
 rsync -avz --progress \
     --exclude='__pycache__/' \
     --exclude='*.pyc' \
@@ -231,159 +231,159 @@ rsync -avz --progress \
     pi@<PI_IP>:~/perception/
 ```
 
-### 3-2. Python 의존성 설치
+### 3-2. Installing Python dependencies
 
 ```bash
-# Pi에서 실행
+# Run on the Pi
 cd ~/perception
 
-# 가상환경 생성 (선택)
+# Create a virtual environment (optional)
 python3 -m venv venv
 source venv/bin/activate
 
-# 의존성 설치
+# Install dependencies
 pip install numpy scipy Pillow psutil
-pip install opencv-python  # 시스템 opencv 사용 시 생략 가능
-pip install ultralytics    # YOLO (detect 모드 사용 시만)
+pip install opencv-python  # can be skipped when using the system opencv
+pip install ultralytics    # YOLO (only when using detect mode)
 ```
 
-> **pyrealsense2 주의**: `pip install pyrealsense2`는 Pi ARM에서 지원 안 될 수 있음.
-> 1단계에서 librealsense를 `-DBUILD_PYTHON_BINDINGS=true`로 빌드했으면
-> 시스템 Python에 자동 설치됨. venv 사용 시 심볼릭 링크 필요:
+> **pyrealsense2 note**: `pip install pyrealsense2` may not be supported on Pi ARM.
+> If you built librealsense with `-DBUILD_PYTHON_BINDINGS=true` in Step 1,
+> it is installed automatically into the system Python. When using a venv, a symbolic link is required:
 > ```bash
-> # pyrealsense2.so 위치 확인
+> # Find the pyrealsense2.so location
 > find /usr/local/lib -name "pyrealsense2*" 2>/dev/null
 >
-> # venv에 링크 (Python 버전에 맞게 수정)
+> # Link it into the venv (adjust for your Python version)
 > ln -s /usr/local/lib/python3.12/dist-packages/pyrealsense2* \
 >       ~/perception/venv/lib/python3.12/site-packages/
 > ```
 
-### 3-3. 경로 수정 (필수)
+### 3-3. Fixing paths (required)
 
-`vio/orbslam_runner.py` 23번째 줄 — ORB-SLAM3 경로:
+`vio/orbslam_runner.py` line 23 — ORB-SLAM3 path:
 
 ```python
-# 변경 전
+# Before
 ORBSLAM3_DIR = "/home/sim2real1/WALJU/deps/ORB_SLAM3"
 
-# 변경 후
+# After
 ORBSLAM3_DIR = os.path.expanduser("~/ORB_SLAM3")
 ```
 
-`vio/orbslam_runner.py` ~365번째 줄 — 라이브러리 경로:
+`vio/orbslam_runner.py` ~line 365 — library path:
 
 ```python
-# 변경 전
+# Before
 rs_lib = "/usr/lib/x86_64-linux-gnu"
 
-# 변경 후 (Pi 64-bit)
+# After (Pi 64-bit)
 rs_lib = "/usr/lib/aarch64-linux-gnu"
 ```
 
 ---
 
-## 4단계: 실행
+## Step 4: Running
 
-### Pi 최적화 모드로 실행 (권장)
+### Running in Pi-optimized mode (recommended)
 
 ```bash
 cd ~/perception
 
-# ORB-SLAM3 RGB-D 모드 (IMU 없음, Pi 최적화)
+# ORB-SLAM3 RGB-D mode (no IMU, Pi-optimized)
 python3 main.py orbslam --pi --no-imu
 
-# ORB-SLAM3 RGB-D-Inertial 모드 (IMU 사용, Pi 최적화)
+# ORB-SLAM3 RGB-D-Inertial mode (with IMU, Pi-optimized)
 python3 main.py orbslam --pi
 
-# 커스텀 VIO 모드 (ORB-SLAM3 없이)
+# Custom VIO mode (without ORB-SLAM3)
 python3 main.py vio --no-imu
 ```
 
-### Pi 최적화 설정 비교
+### Pi-optimized config comparison
 
-| 파라미터 | 기본값 | Pi 값 | 효과 |
+| Parameter | Default | Pi value | Effect |
 |----------|--------|-------|------|
-| 해상도 | 640x480 | 424x240 | 픽셀 수 ~3배 감소 |
-| FPS | 30 | 15 | CPU 부하 50% 감소 |
-| ORB Features | 1250 | 500 | 특징점 추출 60% 감소 |
-| Pyramid Levels | 8 | 4 | 메모리/연산 50% 감소 |
+| Resolution | 640x480 | 424x240 | ~3x fewer pixels |
+| FPS | 30 | 15 | 50% less CPU load |
+| ORB Features | 1250 | 500 | 60% fewer feature extractions |
+| Pyramid Levels | 8 | 4 | 50% less memory/compute |
 
-> **참고**: Pi5는 Pi4 대비 약 2~3배 성능이므로, 여유가 있다면 Pi 최적화 없이
-> 기본 설정(640x480@30fps)으로도 실행 가능. `--pi` 플래그 없이 테스트해 볼 것.
+> **Note**: The Pi5 is roughly 2~3x faster than the Pi4, so if you have headroom you can also run
+> with the default config (640x480@30fps) without Pi optimization. Try testing without the `--pi` flag.
 
-### Headless 모드 (모니터 없이 SSH)
+### Headless mode (over SSH without a monitor)
 
 ```bash
-# Pangolin viewer 비활성화
+# Disable the Pangolin viewer
 export ORBSLAM_NO_VIEWER=1
 
-# X forwarding으로 SSH 접속 (OpenCV 창 보려면)
+# SSH with X forwarding (to see OpenCV windows)
 ssh -X pi@<PI_IP>
 
-# 또는 완전 headless로 돌리려면 orbslam_runner.py에서
-# cv2.imshow 관련 코드 주석 처리 필요
+# Or, to run fully headless, you need to comment out the
+# cv2.imshow-related code in orbslam_runner.py
 ```
 
 ---
 
-## 5단계: 트러블슈팅
+## Step 5: Troubleshooting
 
-### 빌드 중 메모리 부족 (OOM Killed)
+### Out of memory during build (OOM Killed)
 
 ```bash
-# 스왑 확인
+# Check swap
 free -h
 
-# 그래도 안 되면 -j1로 빌드
+# If it still fails, build with -j1
 make -j1
 ```
 
-### RealSense 카메라 인식 안 됨
+### RealSense camera not recognized
 
 ```bash
-# USB 장치 확인
+# Check USB devices
 lsusb | grep Intel
 
-# Python으로 확인
+# Check with Python
 python3 -c "import pyrealsense2 as rs; print(rs.context().query_devices())"
 
-# 권한 문제 시
+# In case of a permission issue
 sudo usermod -aG video $USER
-# 로그아웃 후 재로그인
+# Log out and log back in
 ```
 
-### libORB_SLAM3.so 찾을 수 없음
+### libORB_SLAM3.so not found
 
 ```bash
-# shared library 경로 추가
+# Add the shared library path
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:~/ORB_SLAM3/lib:~/ORB_SLAM3/Thirdparty/DBoW2/lib:~/ORB_SLAM3/Thirdparty/g2o/lib
 
-# 영구 적용
+# Apply permanently
 echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:~/ORB_SLAM3/lib:~/ORB_SLAM3/Thirdparty/DBoW2/lib:~/ORB_SLAM3/Thirdparty/g2o/lib' >> ~/.bashrc
 ```
 
-### OpenCV 버전 문제
+### OpenCV version issue
 
 ```bash
-# 4.4 이상이어야 ORB-SLAM3 빌드 가능
+# Must be 4.4 or higher to build ORB-SLAM3
 pkg-config --modversion opencv4
-# Ubuntu 24.04는 OpenCV 4.6+ 포함되어 있으므로 보통 문제 없음
+# Ubuntu 24.04 includes OpenCV 4.6+, so usually no problem
 ```
 
 ---
 
-## 요약 체크리스트
+## Summary checklist
 
-- [ ] Ubuntu 24.04 64-bit 설치
-- [ ] 시스템 패키지 설치 (cmake, opencv, eigen3, boost 등)
-- [ ] 스왑 2GB로 확장 (4GB 모델만)
-- [ ] librealsense 소스 빌드 + Python 바인딩
-- [ ] udev 규칙 설치
-- [ ] Pangolin 빌드
-- [ ] ORB-SLAM3 전체 소스 전송 (빌드 산출물 제외)
-- [ ] ORB-SLAM3 Third-party → 메인 순서로 빌드 (`-j3~-j4`)
-- [ ] perception Python 프로젝트 전송
-- [ ] Python 의존성 설치
-- [ ] `orbslam_runner.py` 경로 수정 (ORBSLAM3_DIR, rs_lib)
-- [ ] `python3 main.py orbslam --pi --no-imu`로 테스트
+- [ ] Install Ubuntu 24.04 64-bit
+- [ ] Install system packages (cmake, opencv, eigen3, boost, etc.)
+- [ ] Expand swap to 2GB (4GB model only)
+- [ ] Source-build librealsense + Python bindings
+- [ ] Install udev rules
+- [ ] Build Pangolin
+- [ ] Transfer the full ORB-SLAM3 source (excluding build artifacts)
+- [ ] Build ORB-SLAM3 third-party → main in order (`-j3~-j4`)
+- [ ] Transfer the perception Python project
+- [ ] Install Python dependencies
+- [ ] Fix `orbslam_runner.py` paths (ORBSLAM3_DIR, rs_lib)
+- [ ] Test with `python3 main.py orbslam --pi --no-imu`

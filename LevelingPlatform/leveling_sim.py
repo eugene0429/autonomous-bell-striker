@@ -54,7 +54,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.widgets import CheckButtons, Slider
 
-# 모터 스트리머 — __main__ 에서 --port 주면 활성, 아니면 None (sim-only).
+# Motor streamer — active when --port is given in __main__, otherwise None (sim-only).
 _streamer: "Optional[MotorStreamer]" = None
 
 # -------------------- Geometry (edit to match your hardware) --------------------
@@ -255,15 +255,15 @@ def forward_kinematics(thetas_q, guess_n, guess_zc):
 
 
 # =====================================================================
-#  MotorStreamer — GUI 드래그 → 실모터 연속 구동 (AIMF streaming)
+#  MotorStreamer — GUI drag → continuous real-motor driving (AIMF streaming)
 #
-#  - GUI 스레드: 매 update() 마다 push((x,y,z)) — 한 슬롯에 덮어쓰기만 한다.
-#  - Worker 스레드: mc.aim_fast() 는 비블로킹 (펌웨어가 syncWrite 후 즉시 OK).
-#    USB CDC RTT (~3 ms) 만에 다음 명령 송신 가능.
-#  - drop-old: 워커가 송신하는 사이에 들어온 중간 타겟은 폐기, 가장 최신
-#    타겟만 다음 회차에 송신.
-#  - 결과: 60 Hz 드래그를 stutter 없이 연속 추종. Dynamixel 서보의 내부
-#    프로파일 컨트롤러가 매 GOAL_POSITION 갱신마다 매끄럽게 재orientation.
+#  - GUI thread: push((x,y,z)) on every update() — only overwrites a single slot.
+#  - Worker thread: mc.aim_fast() is non-blocking (firmware returns OK immediately
+#    after syncWrite). The next command can be sent within one USB CDC RTT (~3 ms).
+#  - drop-old: intermediate targets that arrive while the worker is sending are
+#    discarded; only the most recent target is sent on the next iteration.
+#  - Result: continuous tracking of a 60 Hz drag without stutter. The Dynamixel
+#    servo's internal profile controller smoothly reorients on every GOAL_POSITION update.
 # =====================================================================
 class MotorStreamer:
     def __init__(self, mc, ik, log=print, use_fast: bool = True):
@@ -278,7 +278,7 @@ class MotorStreamer:
         self._use_fast = use_fast
 
     def set_fast(self, fast: bool) -> None:
-        """AIMF (비블로킹) vs AIM (블로킹) 전환. 진단/디버깅용."""
+        """Toggle between AIMF (non-blocking) and AIM (blocking). For diagnostics/debugging."""
         self._use_fast = bool(fast)
         mode = "AIMF (fast)" if self._use_fast else "AIM (blocking)"
         self._log(f"[motor-streamer] mode = {mode}")
@@ -315,9 +315,9 @@ class MotorStreamer:
                 if out.get("angles_steps") is None:
                     continue   # IK unreachable — skip
                 if self._use_fast:
-                    self._mc.aim_fast(out)   # AIMF 비블로킹
+                    self._mc.aim_fast(out)   # AIMF non-blocking
                 else:
-                    self._mc.aim(out)        # AIM 블로킹 (진단용)
+                    self._mc.aim(out)        # AIM blocking (for diagnostics)
             except Exception as e:
                 self._log(f"[motor-streamer] {type(e).__name__}: {e}")
 
@@ -522,7 +522,7 @@ def update(_=None):
     title.set_color('black' if ok else 'red')
     fig.canvas.draw_idle()
 
-    # 실모터 스트리밍 (drop-old). IK 불가능한 포즈는 건너뜀.
+    # Real-motor streaming (drop-old). Skip IK-infeasible poses.
     if _streamer is not None and ok and not np.any(np.isnan(thetas)):
         _streamer.push((target_state['x'], target_state['y'], target_state['z']))
 
@@ -609,13 +609,13 @@ if __name__ == '__main__':
     ap = argparse.ArgumentParser(
         description="3-RRS leveling sim + optional live motor streaming")
     ap.add_argument("--port", default=None,
-                    help="OpenRB serial port (예: /dev/cu.usbmodem11301). "
-                         "생략 시 sim-only.")
+                    help="OpenRB serial port (e.g. /dev/cu.usbmodem11301). "
+                         "sim-only if omitted.")
     ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--home", action="store_true",
-                    help="모터 연결 직후 HOME 송신")
+                    help="send HOME immediately after connecting to the motor")
     ap.add_argument("--verbose", action="store_true",
-                    help="시리얼 송수신 라인을 stderr 로 출력")
+                    help="print serial TX/RX lines to stderr")
     args = ap.parse_args()
 
     # quick sanity check
@@ -625,7 +625,7 @@ if __name__ == '__main__':
     if args.port is None:
         plt.show()
     else:
-        # leveling_ik / leveling_motor 는 같은 디렉토리에 있으므로 import 경로 추가
+        # leveling_ik / leveling_motor are in the same directory, so add the import path
         sys.path.insert(0, str(_P(__file__).resolve().parent))
         from leveling_ik    import LevelingConfig, LevelingIK         # noqa: E402
         from leveling_motor import LevelingMotorClient, MotorClientConfig  # noqa: E402
@@ -636,7 +636,7 @@ if __name__ == '__main__':
         mc.connect()
         try:
             if not mc.ping():
-                print("[FAIL] OpenRB PING 실패", file=sys.stderr)
+                print("[FAIL] OpenRB PING failed", file=sys.stderr)
                 sys.exit(2)
             if args.home:
                 print("[motor] HOME ...")
@@ -647,9 +647,9 @@ if __name__ == '__main__':
             print(f"[motor] streaming to {args.port} "
                   f"(AIMF non-blocking, drop-old)")
 
-            # ── Fast 모드 토글 (AIMF vs AIM 진단용) ───────────────
-            #   체크 ON  → AIMF (비블로킹, 스트리밍에 적합)
-            #   체크 OFF → AIM  (블로킹, 모터가 실제 응답하는지 검증용)
+            # ── Fast mode toggle (AIMF vs AIM, for diagnostics) ───────────────
+            #   checked ON  → AIMF (non-blocking, suited for streaming)
+            #   checked OFF → AIM  (blocking, to verify the motor actually responds)
             ax_fast = fig.add_axes([0.64, 0.04, 0.20, 0.07])
             fast_check = CheckButtons(ax_fast, ["Fast mode (AIMF)"], [True])
 
@@ -659,7 +659,7 @@ if __name__ == '__main__':
                     _streamer.set_fast(fast)
             fast_check.on_clicked(_on_fast_toggle)
 
-            # 초기 타겟 1회 송신
+            # Send the initial target once
             update()
 
             def _on_close(_evt):

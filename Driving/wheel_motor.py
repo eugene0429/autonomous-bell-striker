@@ -2,7 +2,7 @@
 Wheel Motor Client — Pi5 ↔ OpenRB-150 serial driver for differential-drive wheel
 angular velocities.
 
-Wire protocol (full spec in docs/superpowers/specs/2026-05-04-driving-pipeline-design.md §3):
+Wire protocol (full spec in docs/COMMUNICATION_PROTOCOL.md §4):
 
     Pi → OpenRB                   OpenRB → Pi
     ─────────────                 ─────────────

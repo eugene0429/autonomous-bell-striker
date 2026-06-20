@@ -68,7 +68,7 @@ class HailoYolo26Detector:
     """
 
     # NHWC last-3 dims → tensor role. 1-class indoor.hef shape verified via
-    # ClientRunner.get_hn_dict() (see HAILO_HEF_CONVERT.md §4 검증).
+    # ClientRunner.get_hn_dict() (see HAILO_HEF_CONVERT.md §4 verification).
     _SHAPE_TO_ROLE = {
         (80, 80, 1): "cls_80",
         (40, 40, 1): "cls_40",

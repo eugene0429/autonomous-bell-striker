@@ -35,7 +35,7 @@ Mode descriptions:
         "--model", type=str, default=None,
         help="YOLO model path (used in detect mode)",
     )
-    # ── orbslam / vio 공용 ──
+    # ── shared by orbslam / vio ──
     parser.add_argument(
         "--imu", action="store_true",
         help="orbslam: enable IMU (default off). vio: ignored.",
@@ -83,17 +83,17 @@ Mode descriptions:
         import os
         os.environ.setdefault("ORBSLAM_NO_VIEWER", "1")
 
-        # 기본값: --pi --no-imu --headless 와 동등 (production 라이브러리 모듈)
+        # default: equivalent to --pi --no-imu --headless (production library module)
         use_imu = args.imu                  # default False
         pi_mode = not args.no_pi            # default True
 
         if args.gui:
-            # 레거시 GUI 테스트 러너 (cv2 viewer + ResourceMonitor)
+            # legacy GUI test runner (cv2 viewer + ResourceMonitor)
             from vio.orbslam_runner import run_orbslam
             os.environ.pop("ORBSLAM_NO_VIEWER", None)
             run_orbslam(use_imu=use_imu, pi_mode=pi_mode)
         else:
-            # 새 production 모듈로 헤드리스 실행
+            # headless run via the new production module
             from vio.orbslam_localizer import (
                 LocalizerConfig, _print_loop)
             _print_loop(LocalizerConfig(use_imu=use_imu, pi_mode=pi_mode))

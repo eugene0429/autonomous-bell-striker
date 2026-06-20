@@ -7,7 +7,7 @@ servoing (no SLAM). Mirrors:
   - perception/detection/visual_servo_target.py (depth ROI median)
   - Driving/visual_servo_driver.py            (FSM-driven control loop)
 
-Phase 2 is NOT included — this is Phase 1 only ("종 바로 아래까지 주행").
+Phase 2 is NOT included — this is Phase 1 only ("drive to directly under the bell").
 
 Backends:
   --backend ultralytics  : PyTorch YOLO .pt (CUDA/CPU/MPS). default.
@@ -15,9 +15,9 @@ Backends:
                            uses perception.detection.hailo_yolo26 decoder.
 
 Usage:
-    모든 파라미터는 config.yaml 에서 로드한다. CLI 는 --config / --dry-run /
-    --debug-detect 토글만 받는다 (run_phase1_visual_servo.py 단독 실행 시에도
-    pipeline.py 와 동일한 yaml 을 공유).
+    All parameters are loaded from config.yaml. The CLI only accepts the
+    --config / --dry-run / --debug-detect toggles (run_phase1_visual_servo.py
+    shares the same yaml as pipeline.py even when run standalone).
 
     python3 run_phase1_visual_servo.py
     python3 run_phase1_visual_servo.py --config configs/sweep.yaml
@@ -155,11 +155,13 @@ class RealRobot:
             return None
         bbox, conf_val = pred
 
-        # depth_m may be None: D435i 깊이는 먼 거리(~2.5m)의 종(곡면/금속)에서
-        # IR 패턴이 안 돌아와 간헐적으로만 유효. 깊이 실패를 "타깃 상실"로
-        # 취급하면 조향 락을 버리고 눈먼 채 SEARCH로 회전 → 리밋 사이클에 빠진다.
-        # 깊이는 전진 속도에만 필요하므로, bbox가 있으면 depth_m=None 으로
-        # 그대로 넘겨 컨트롤러가 조향/틸트는 계속하고 전진만 멈추게 한다.
+        # depth_m may be None: D435i depth is only intermittently valid for a
+        # bell (curved/metal) at long range (~2.5m) because the IR pattern
+        # doesn't return. Treating a depth failure as "target lost" would drop
+        # the steering lock and rotate blindly into SEARCH → falling into a
+        # limit cycle. Depth is only needed for forward speed, so if a bbox
+        # exists, pass depth_m=None through unchanged so the controller keeps
+        # steering/tilting and only stops driving forward.
         depth_m = compute_target_depth(
             depth, bbox,
             roi_frac=self.roi_frac,
@@ -271,9 +273,10 @@ def main():
 
     wheel_cfg = WheelMotorConfig(
         port=args.port, baud=args.baud, dry_run=args.dry_run,
-        # tilt_sync._ser = wheel._ser 로 공유되므로 sync TILT motion-complete
-        # (waitMotion 최대 4s) 가 끊기지 않도록 wheel 쪽 timeout 도 5s 로.
-        # wheel 의 sync 명령(PING/STOP)은 즉시 응답이라 부작용 없음.
+        # Since tilt_sync._ser = wheel._ser is shared, set the wheel-side
+        # timeout to 5s too so the sync TILT motion-complete (waitMotion up to
+        # 4s) isn't cut off. The wheel's sync commands (PING/STOP) respond
+        # immediately, so there's no side effect.
         sync_read_timeout_sec=5.0,
     )
     tilt_cfg = TiltMotorConfig(
@@ -282,8 +285,8 @@ def main():
 
     # WheelMotorClient owns the single OpenRB serial; the tilt clients piggy-back
     # on its open file descriptor (OpenRB has one USB-CDC, spec §6.2).
-    # hardware_reset_on_start=True: dirty prior session 후의 USB suspend
-    # ('failed to set power state') 회복. ~5s 시동 지연.
+    # hardware_reset_on_start=True: recover from USB suspend
+    # ('failed to set power state') after a dirty prior session. ~5s startup delay.
     with ExitStack() as stack:
         detector = stack.enter_context(detector_ctx)
         camera = stack.enter_context(

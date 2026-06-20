@@ -1,8 +1,8 @@
 """
 Leveling Platform — Pi5 ↔ OpenRB-150 serial client.
 
-[LevelingIK.aim_at()](leveling_ik.py) 의 출력 (`angles_steps`) 을 OpenRB-150 으로
-보내 3개의 Dynamixel(또는 동등 모터) 을 절대 위치로 이동시키는 클라이언트.
+Client that sends the output (`angles_steps`) of [LevelingIK.aim_at()](leveling_ik.py)
+to the OpenRB-150 to move 3 Dynamixel (or equivalent) motors to absolute positions.
 
 ═══════════════════════════════════════════════════════════════════════
   Wire Protocol — ASCII / line-oriented / '\n'-terminated
@@ -10,11 +10,11 @@ Leveling Platform — Pi5 ↔ OpenRB-150 serial client.
 
 Transport
 ---------
-- USB CDC virtual COM (Linux: `/dev/ttyACM0` 등)
-- Baud   : 115200  (안정적·호환 좋음. 필요 시 1 Mbps 까지 상향 가능)
+- USB CDC virtual COM (Linux: `/dev/ttyACM0`, etc.)
+- Baud   : 115200  (stable and well-supported; can be raised up to 1 Mbps if needed)
 - 8N1, no flow control
 - Encoding: 7-bit ASCII
-- Line terminator: LF only ('\n' / 0x0A) — CR 무시
+- Line terminator: LF only ('\n' / 0x0A) — CR ignored
 
 Command (Pi → OpenRB)
 ---------------------
@@ -22,36 +22,36 @@ Command (Pi → OpenRB)
         keep-alive / health check.
 
     AIM <s1> <s2> <s3>\n
-        모터 1/2/3 을 절대 인코더 step 위치로 동시 이동.
+        Move motors 1/2/3 simultaneously to absolute encoder step positions.
         s_i : signed decimal integer.
-              MOTOR_STEPS=4096 기준 [-2048..+2047] 가 typical.
-              펌웨어 측에서 한계 위반 시 ERR OUT_OF_RANGE 반환.
-        OpenRB 는 모든 모터의 모션 완료 (또는 timeout/abort) 후에 'OK'/'ERR' 반환.
+              For MOTOR_STEPS=4096, [-2048..+2047] is typical.
+              The firmware returns ERR OUT_OF_RANGE on a limit violation.
+        OpenRB returns 'OK'/'ERR' after all motors complete motion (or timeout/abort).
 
     HOME\n
-        모든 모터를 step=0 으로 이동.
+        Move all motors to step=0.
 
     STATUS\n
-        현재 위치/플래그 조회 (블로킹 X, 즉시 응답).
+        Query current position/flags (non-blocking, immediate response).
 
     STOP\n
-        모든 모터 즉시 정지 (현재 명령을 취소).
+        Stop all motors immediately (cancel the current command).
 
 Response (OpenRB → Pi)
 ----------------------
     OK\n
-        명령 처리 완료. AIM/HOME 의 경우 모션 완료까지 블로킹 후 반환.
+        Command processed. For AIM/HOME, returns after blocking until motion completes.
     ERR <reason>\n
-        실패. reason 예: PARSE / OUT_OF_RANGE / TIMEOUT / NOT_HOMED / BUSY / HW
+        Failure. reason e.g.: PARSE / OUT_OF_RANGE / TIMEOUT / NOT_HOMED / BUSY / HW
     PONG\n
-        PING 의 응답.
+        Response to PING.
     S <wL> <wR> <s1> <s2> <s3> <s4> <s5> <rpmT> <rpmB> <flags>\n
-        STATUS 의 응답. (펌웨어 v1.2+ 의 11-필드 포맷)
-            wL/wR        : 휠 ID 6/7 실측 속도 [mrad/s]
-            s1/s2/s3     : 레벨링 LVL_1/2/3 step
-            s4           : 카메라 틸트 ID 4 step
-            s5           : 로더 ID 5 step
-            rpmT/rpmB    : T-motor TOP/BOTTOM 현재 RPM 명령값
+        Response to STATUS. (11-field format of firmware v1.2+)
+            wL/wR        : wheel ID 6/7 measured speed [mrad/s]
+            s1/s2/s3     : leveling LVL_1/2/3 step
+            s4           : camera tilt ID 4 step
+            s5           : loader ID 5 step
+            rpmT/rpmB    : T-motor TOP/BOTTOM current RPM command value
             flags        : bit0=wheel watchdog tripped
                            bit1=leveling moving
                            bit2=tilt moving
@@ -63,17 +63,20 @@ Response (OpenRB → Pi)
 
 Synchronization rules
 ---------------------
-- 동기식 request-response. Pi 는 OK/ERR/PONG/S 라인을 받기 전 다음 명령 안 보냄.
-- OpenRB 는 한 번에 한 명령만 처리. 추가 명령은 큐에 쌓지 말고 BUSY 로 거절.
-- AIM/HOME 은 모션 완료까지 응답 보류 (가장 단순한 동기 모델).
-- 모터 stall / timeout 검출 시 자동으로 STOP 후 ERR 반환.
+- Synchronous request-response. The Pi does not send the next command before
+  receiving an OK/ERR/PONG/S line.
+- OpenRB processes only one command at a time. Additional commands are not queued
+  but rejected with BUSY.
+- AIM/HOME withhold their response until motion completes (the simplest sync model).
+- On motor stall / timeout detection, automatically STOP and return ERR.
 
 Frame size & timing
 -------------------
-- 가장 긴 일반 명령: "AIM -2048 -2048 -2048\n" = 23 bytes ≈ 2 ms @ 115200
-- 가장 긴 응답:      "S -30000 30000 -2048 -2048 -2048 -2048 -2048 10000 10000 255\n"
-                     ≈ 60 bytes ≈ 5 ms (STATUS, v1.2+ 11-필드 포맷)
-- 모션 latency 포함 한 사이클 ≤ 100 ms 가 일반 (Phase 2 의 매 타격 직전 1 회 호출)
+- Longest typical command: "AIM -2048 -2048 -2048\n" = 23 bytes ≈ 2 ms @ 115200
+- Longest response:        "S -30000 30000 -2048 -2048 -2048 -2048 -2048 10000 10000 255\n"
+                     ≈ 60 bytes ≈ 5 ms (STATUS, v1.2+ 11-field format)
+- One cycle including motion latency ≤ 100 ms is typical (called once just before
+  each strike in Phase 2)
 
 ═══════════════════════════════════════════════════════════════════════
   Python API
@@ -85,12 +88,12 @@ Frame size & timing
     ik = LevelingIK(LevelingConfig())
 
     with LevelingMotorClient(MotorClientConfig(port="/dev/ttyACM0")) as mc:
-        mc.ping()                                    # 헬스 체크
-        mc.home()                                    # 시작 시 home
+        mc.ping()                                    # health check
+        mc.home()                                    # home at startup
         out = ik.aim_at((0.10, 0.00, 3.0))
         if not out["ok"]:
             raise RuntimeError("IK unreachable")
-        mc.aim(out)                                  # 모터 이동 + OK 대기
+        mc.aim(out)                                  # move motors + wait for OK
         print(mc.status())  # {wheel_mrad, leveling_steps, tilt_step,
                             #  loader_step, tmotor_rpm, flags,
                             #  watchdog, leveling_moving, tilt_moving,
@@ -114,59 +117,59 @@ class MotorClientConfig:
     # ── Transport ──
     port: str = "/dev/ttyACM0"
     baud: int = 115200
-    read_timeout_sec: float = 5.0           # AIM/HOME 모션 완료 대기 포함
+    read_timeout_sec: float = 5.0           # includes waiting for AIM/HOME motion to complete
     write_timeout_sec: float = 1.0
-    open_settle_sec: float = 2.0            # 포트 open 후 OpenRB 안정화 대기
+    open_settle_sec: float = 2.0            # wait for OpenRB to stabilize after port open
 
-    # ── 회전 방향 / 영점 보정 ──
-    # IK 가 주는 angles_steps 에 적용: cmd_steps[i] = sign[i] * angles_steps[i] + offset[i]
+    # ── Rotation direction / zero-point calibration ──
+    # Applied to the angles_steps from IK: cmd_steps[i] = sign[i] * angles_steps[i] + offset[i]
     direction_signs: Tuple[int, int, int] = (+1, +1, +1)
     home_offsets_steps: Tuple[int, int, int] = (0, 0, 0)
 
-    # ── 안전 한계 (펌웨어가 cross-check 하지만 클라이언트도 미리 검사) ──
+    # ── Safety limits (the firmware cross-checks, but the client also pre-checks) ──
     motor_min_step: int = -2048
     motor_max_step: int = +2047
 
-    # ── 디버그 ──
-    verbose: bool = False                   # 송수신 라인을 stderr 로 출력
-    dry_run: bool = False                   # True 면 직접 시리얼 안 보내고 출력만
+    # ── Debug ──
+    verbose: bool = False                   # print TX/RX lines to stderr
+    dry_run: bool = False                   # if True, do not send over serial, just print
 
 
 # ──────────────────────────────────────────────
 # Exceptions
 # ──────────────────────────────────────────────
 class MotorProtocolError(RuntimeError):
-    """OpenRB 펌웨어가 ERR 응답을 줬거나 응답 형식이 깨짐."""
+    """The OpenRB firmware returned an ERR response or the response format is malformed."""
 
 
 class MotorTimeoutError(RuntimeError):
-    """timeout 안에 응답이 들어오지 않음."""
+    """No response arrived within the timeout."""
 
 
 # ──────────────────────────────────────────────
 # Client
 # ──────────────────────────────────────────────
 class LevelingMotorClient:
-    """OpenRB-150 으로 3-RRS 레벨링 모터 명령 송신."""
+    """Send 3-RRS leveling motor commands to the OpenRB-150."""
 
     def __init__(self, cfg: Optional[MotorClientConfig] = None):
         self.cfg = cfg if cfg is not None else MotorClientConfig()
         self._ser = None  # pyserial.Serial
-        self._last_cmd: str = ""  # dry-run 응답 합성용
+        self._last_cmd: str = ""  # for synthesizing dry-run responses
 
     # ── lifecycle ──
     def connect(self) -> None:
         if self.cfg.dry_run:
             self._log("[dry-run] skip serial open")
             return
-        import serial  # lazy import — pyserial 이 없는 환경도 dry_run 으로 import 가능
+        import serial  # lazy import — even environments without pyserial can import under dry_run
         self._ser = serial.Serial(
             port=self.cfg.port,
             baudrate=self.cfg.baud,
             timeout=self.cfg.read_timeout_sec,
             write_timeout=self.cfg.write_timeout_sec,
         )
-        # OpenRB 가 USB-CDC reset 후 안정화될 때까지 대기 + 버퍼 비우기
+        # Wait for the OpenRB to stabilize after USB-CDC reset + flush buffers
         time.sleep(self.cfg.open_settle_sec)
         self._ser.reset_input_buffer()
         self._ser.reset_output_buffer()
@@ -198,14 +201,14 @@ class LevelingMotorClient:
         return self._command("PING") == "PONG"
 
     def aim(self, ik_result: Dict) -> bool:
-        """LevelingIK.aim_at() 출력 dict 를 받아 AIM 명령으로 송신.
+        """Take the LevelingIK.aim_at() output dict and send it as an AIM command.
 
         Raises
         ------
-        ValueError              IK 가 unreachable 이거나 (angles_steps is None)
-                                step 값이 한계 밖일 때.
-        MotorProtocolError      OpenRB 가 ERR 응답.
-        MotorTimeoutError       응답이 timeout 안에 안 옴.
+        ValueError              When IK is unreachable (angles_steps is None) or
+                                a step value is out of limits.
+        MotorProtocolError      OpenRB returned an ERR response.
+        MotorTimeoutError       No response arrived within the timeout.
         """
         steps = ik_result.get("angles_steps")
         if steps is None or len(steps) != 3:
@@ -221,16 +224,17 @@ class LevelingMotorClient:
             f"AIM {cmd_steps[0]} {cmd_steps[1]} {cmd_steps[2]}") == "OK"
 
     def aim_fast(self, ik_result: Dict) -> bool:
-        """AIM 의 streaming 버전 — 펌웨어가 syncWrite 만 하고 즉시 OK.
+        """Streaming version of AIM — the firmware only does syncWrite and returns OK immediately.
 
-        용도
-        ----
-        GUI 드래그·연속 추종처럼 모션 완료를 기다리지 않고 다음 명령을
-        바로 송신해야 할 때. AIM 과 응답 의미가 다르다:
-            AIM       OK = 모터가 목표에 도달 (tolerance 내)
-            aim_fast  OK = 명령이 수신·발송되었음 (아직 이동 중일 수 있음)
+        Use case
+        --------
+        When the next command must be sent right away without waiting for motion
+        to complete, as in GUI dragging / continuous tracking. The meaning of the
+        response differs from AIM:
+            AIM       OK = motor reached the target (within tolerance)
+            aim_fast  OK = command was received and dispatched (may still be moving)
 
-        "도달 보장" 이 필요한 시퀀스 (예: 조준 후 사격) 에는 AIM 을 쓸 것.
+        For sequences that need a "reach guarantee" (e.g. aim then fire), use AIM.
         """
         steps = ik_result.get("angles_steps")
         if steps is None or len(steps) != 3:
@@ -252,9 +256,9 @@ class LevelingMotorClient:
         return self._command("STOP") == "OK"
 
     def status(self) -> Dict:
-        """STATUS 명령 응답을 dict 로 파싱.
+        """Parse the STATUS command response into a dict.
 
-        펌웨어 응답 포맷 (v1.2+):
+        Firmware response format (v1.2+):
             S <wL> <wR> <s1> <s2> <s3> <s4> <s5> <rpmT> <rpmB> <flags>
         """
         resp = self._command("STATUS")
@@ -288,14 +292,14 @@ class LevelingMotorClient:
             "moving":          bool(flags & 0b00001110),  # leveling|tilt|loader
         }
 
-    # ── 내부 ──
+    # ── Internal ──
     def _apply_calibration(self, ik_steps) -> List[int]:
         c = self.cfg
         return [int(c.direction_signs[i] * ik_steps[i] + c.home_offsets_steps[i])
                 for i in range(3)]
 
     def _command(self, cmd: str) -> str:
-        """한 줄 명령 송신 후 한 줄 응답 반환. ERR 응답은 예외로 변환."""
+        """Send a one-line command and return a one-line response. ERR responses are converted to exceptions."""
         self._send_line(cmd)
         resp = self._recv_line()
         if resp.startswith("ERR"):
@@ -330,11 +334,11 @@ class LevelingMotorClient:
 
     @staticmethod
     def _dry_run_response(cmd: str) -> str:
-        """프로토콜 명세에 부합하는 가짜 응답 — dry-run/유닛테스트용."""
+        """A fake response conforming to the protocol spec — for dry-run/unit tests."""
         if cmd == "PING":
             return "PONG"
         if cmd == "STATUS":
-            # 모션 종료 + homed 상태로 가정 (flags = 0b10000)
+            # Assume motion finished + homed state (flags = 0b10000)
             return "S 0 0 0 16"
         return "OK"  # AIM / HOME / STOP
 
@@ -344,7 +348,7 @@ class LevelingMotorClient:
 
 
 # ──────────────────────────────────────────────
-# CLI — IK + serial send 통합 한 발 송신 (벤치 검증용)
+# CLI — integrated IK + serial send single-shot (for bench verification)
 # ──────────────────────────────────────────────
 if __name__ == "__main__":
     import argparse
@@ -361,7 +365,7 @@ if __name__ == "__main__":
     ap.add_argument("--home", action="store_true",
                     help="send HOME before AIM")
     ap.add_argument("--dry-run", action="store_true",
-                    help="시리얼 미접속, 명령 라인만 출력")
+                    help="no serial connection, print command lines only")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 

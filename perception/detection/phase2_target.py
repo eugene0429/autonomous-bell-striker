@@ -4,7 +4,7 @@ Camera→Plate coordinate transform + single-frame estimator + 1-second
 multi-frame aggregation. Replaces `DummyTargetProvider.get_phase2_target()`
 stub in real mode.
 
-See: docs/superpowers/specs/2026-05-21-phase2-aiming-pipeline-design.md
+See: docs/SW_ARCHITECTURE.md §5-6 (Phase 2 aiming, Camera->Plate transform)
 """
 
 from __future__ import annotations
