@@ -4,6 +4,8 @@
 > vertically oscillating bell (~3 m above the ground), **fine-aims** with a leveling
 > platform, and **strikes it twice** with a flywheel launcher.
 
+🏆 **1st place — 2026 KAIST ME Capstone Design** (Team **team-won**).
+
 The entire process is automated end to end with no human intervention. The primary sensor
 is a single **Intel RealSense D435i** (RGB + Depth + IMU), and all actuators (wheel DC ×2,
 leveling DXL ×3, camera tilt ×1, loader ×1, flywheel T-motor ×2) are controlled by a single
