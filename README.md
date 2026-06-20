@@ -1,6 +1,6 @@
 # Autonomous Bell-Striker Robot
 
-> 2026 ME Capstone Design — a mobile robot system that **autonomously drives** toward a
+> 2026 KAIST ME Capstone Design — a mobile robot system that **autonomously drives** toward a
 > vertically oscillating bell (~3 m above the ground), **fine-aims** with a leveling
 > platform, and **strikes it twice** with a flywheel launcher.
 
@@ -67,6 +67,30 @@ Once near the bell, the 3-RRS leveling platform fine-aims with inverse kinematic
 flywheel launcher strikes twice.
 
 ![Phase 2 aiming and strike](https://github.com/user-attachments/assets/7dc9e534-1b8b-4b0f-a8ee-525268ca57b2)
+
+---
+
+## Perception — Bell Detection (YOLO26n → Hailo HEF, ~60 FPS)
+
+The bell detector is a **1-class YOLO26n** model fine-tuned from the pretrained `yolo26n.pt`.
+
+**Training data.** ~2,000 real images captured in the target environment, then expanded
+with offline [albumentations](perception/training/augment_dataset.py) augmentation —
+hue/saturation/**value** shift, brightness/contrast, scale, rotation, flip, and Gaussian
+noise. The aggressive value/brightness augmentation makes detection **robust across a wide
+range of lighting conditions**.
+
+```bash
+# Augment the train split (×5 copies per original), then fine-tune
+python -m perception.training.augment_dataset --multiplier 5
+python -m perception.training.train --epochs 150 --imgsz 640
+```
+
+**On-device inference (~60 FPS).** The trained `.pt` is exported to ONNX
+(`opset=11, imgsz=640, nms=False`) and compiled to a Hailo-8L `.hef`, running on the
+**Pi 5 + AI Hat+ (Hailo-8L)** at **~60 FPS** — fast enough to close the visual-servo loop
+in real time. Full conversion procedure:
+[perception/detection/HAILO_HEF_CONVERT.md](perception/detection/HAILO_HEF_CONVERT.md).
 
 ---
 
