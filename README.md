@@ -61,7 +61,8 @@ wheels close the loop.
 ### Phase 2 — Aiming & Strike (3-RRS leveling platform + flywheel)
 
 Once near the bell, the 3-RRS leveling platform fine-aims with inverse kinematics
-(incl. lead-aim for the oscillating target), then the flywheel launcher strikes twice.
+(center-aim — targeting the center of the bell's vertical oscillation), then the
+flywheel launcher strikes twice.
 
 ![Phase 2 aiming and strike](https://github.com/user-attachments/assets/7dc9e534-1b8b-4b0f-a8ee-525268ca57b2)
 
@@ -73,7 +74,7 @@ Once near the bell, the 3-RRS leveling platform fine-aims with inverse kinematic
 |---|---|
 | [pipeline.py](pipeline.py) | **Integrated orchestrator** — runs Phase 1 → Phase 2 consecutively in a single process (sharing a single RealSense + single OpenRB) |
 | [run_phase1_visual_servo.py](run_phase1_visual_servo.py) | Phase 1 standalone runner (visual-servo driving) |
-| [run_phase2_aiming.py](run_phase2_aiming.py) | Phase 2 standalone runner (aiming & strike, incl. lead-aim) |
+| [run_phase2_aiming.py](run_phase2_aiming.py) | Phase 2 standalone runner (aiming & strike, center-aim) |
 | [run_center_depth_probe.py](run_center_depth_probe.py) | Validation tool — prints bbox center depth (Hailo) |
 | [config.yaml](config.yaml) · [config_loader.py](config_loader.py) | Central management of all runtime parameters |
 | [Driving/](Driving/) | Wheel motor · visual-servo driving control · simulation |
