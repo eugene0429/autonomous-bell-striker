@@ -7,8 +7,10 @@
 🏆 **1st place — 2026 KAIST ME Capstone Design** (Team **team-won**).
 
 The entire process is automated end to end with no human intervention. The primary sensor
-is a single **Intel RealSense D435i** (RGB + Depth + IMU), and all actuators (wheel DC ×2,
-leveling DXL ×3, camera tilt ×1, loader ×1, flywheel T-motor ×2) are controlled by a single
+is a single **Intel RealSense D435i** (RGB + Depth + IMU). Every actuator except the
+flywheel is a **Dynamixel** servo on a single TTL **daisy chain** — 2 drive wheels (XC430,
+velocity mode), 3 leveling joints, 1 camera tilt, and 1 loader (7 servos total) — while the
+2 flywheel **T-motors** run on PWM ESCs. All of them are controlled by a single
 **OpenRB-150** board.
 
 ---
@@ -31,7 +33,7 @@ Coarsely move near the bell with the mobile base  (Phase 1: Driving)
 
 | Component | Role |
 |---|---|
-| 2 wheels (diff drive) | Phase 1 coarse driving |
+| 2 wheels (Dynamixel diff drive) | Phase 1 coarse driving |
 | 3-DOF Leveling Platform (3-RRS) | Phase 2 fine aiming (IK) |
 | Flywheel + Launcher | Phase 2 strike |
 | Raspberry Pi 5 | Perception · high-level control (YOLO, pipeline) |

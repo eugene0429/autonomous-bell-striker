@@ -2,7 +2,7 @@
 
 > v1.1 — Added `TILT_ASYNC` command (15Hz tilt streaming for visual-servo driving mode).
 
-> A single OpenRB-150 board controls all actuators (wheel DC ×2, leveling DXL ×3, camera tilt DXL ×1, loader DXL ×1, flywheel T-motor ×2) and communicates with the Pi5 over a single strand of USB CDC serial. This document defines the line-based ASCII protocol exchanged over that serial link.
+> A single OpenRB-150 board controls all actuators (wheel DXL ×2, leveling DXL ×3, camera tilt DXL ×1, loader DXL ×1 — 7 Dynamixels on one TTL daisy chain — plus flywheel T-motor ×2 on PWM ESCs) and communicates with the Pi5 over a single strand of USB CDC serial. This document defines the line-based ASCII protocol exchanged over that serial link.
 >
 > Related docs: [SW_ARCHITECTURE.md](SW_ARCHITECTURE.md), [Driving/wheel_motor.py](../Driving/wheel_motor.py), [LevelingPlatform/leveling_motor.py](../LevelingPlatform/leveling_motor.py), [LevelingPlatform/openrb_sketch_reference.ino](../LevelingPlatform/openrb_sketch_reference.ino)
 
@@ -23,10 +23,10 @@
 | 1, 2, 3 | Leveling platform (3-RRS) | DXL TTL bus |
 | 4 | Camera tilt | DXL TTL bus |
 | 5 | Loader (feeds 1 round) | DXL TTL bus |
-| — | Wheel DC ×2 | OpenRB GPIO + external H-bridge |
+| 6, 7 | Wheels (XC430, velocity mode) | DXL TTL bus |
 | — | T-motor ×2 (flywheel) | OpenRB PWM (or CAN) |
 
-A total of 5 Dynamixels are chained on a single TTL daisy chain. The DC wheel motors and T-motor flywheels are controlled separately via the OpenRB's general output pins.
+A total of 7 Dynamixels (leveling ×3, tilt ×1, loader ×1, wheels ×2) are chained on a single TTL daisy chain — there are no DC motors and no external H-bridge. Only the T-motor flywheels are controlled separately, via the OpenRB's PWM output pins.
 
 ## 3. Phase Policy / Watchdog
 
@@ -161,9 +161,9 @@ Thanks to the All-Stop semantics of `STOP`, any facade can bring all actuators t
 ## 8. OpenRB Firmware Responsibilities Summary
 
 - Line parser + dispatcher (reference: [openrb_sketch_reference.ino](../LevelingPlatform/openrb_sketch_reference.ino))
-- `DRIVE` 200 ms watchdog: track last receive time, force both wheel PWMs to 0 on expiry
-- DC motor PWM conversion (mrad/s → duty); encoder PID is optional
-- Manage the 5 DXL IDs, motion-complete polling for `AIM`·`HOME`·`TILT`·`LOAD`
+- `DRIVE` 200 ms watchdog: track last receive time, force both wheels to 0 velocity on expiry
+- Wheel velocity conversion (mrad/s → XC430 velocity units, 0.229 rpm/unit)
+- Manage the 7 DXL IDs, motion-complete polling for `AIM`·`HOME`·`TILT`·`LOAD`
 - T-motor output (PWM or CAN abstraction), `SPIN` returns OK immediately (no wait to reach)
 - Error latch + `STATUS` flag update
 - `STOP` priority: immediately terminate all motion + flywheel 0; DXL stays holding (torque kept ON)
