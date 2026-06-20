@@ -11,6 +11,12 @@ leveling DXL ×3, camera tilt ×1, loader ×1, flywheel T-motor ×2) are control
 
 ---
 
+## Demo
+
+https://github.com/user-attachments/assets/267859db-94c6-4d44-a497-43313fc8f1da
+
+---
+
 ## System Overview
 
 ```
@@ -18,6 +24,8 @@ Coarsely move near the bell with the mobile base  (Phase 1: Driving)
         → Fine-aim with the leveling platform      (Phase 2: Aiming, 3-RRS IK)
         → Strike with the flywheel launcher ×2      (Phase 2: Strike)
 ```
+
+![Hardware schematic](https://github.com/user-attachments/assets/3c12ae12-a674-4f7b-8504-1693d8512126)
 
 | Component | Role |
 |---|---|
@@ -36,6 +44,26 @@ For the detailed design see [docs/SW_ARCHITECTURE.md](docs/SW_ARCHITECTURE.md); 
 > **YOLO + depth active-tilt visual servoing**. The SLAM/VIO code
 > ([perception/vio/](perception/vio/), `Pangolin`·`librealsense` submodules) is preserved
 > for reference only (unused in the current pipeline).
+
+---
+
+## How It Works
+
+### Phase 1 — Driving (YOLO + depth visual servo)
+
+The mobile base coarsely drives toward the bell using SLAM-free visual servoing: YOLO
+detects the bell, depth + active camera tilt estimate its position, and the diff-drive
+wheels close the loop.
+
+![Phase 1 visual servo](https://github.com/user-attachments/assets/58a46286-225e-4add-93af-0a2dc42129a5)
+![Phase 1 visual servo](https://github.com/user-attachments/assets/613b813f-aa24-4701-b39e-f028efb1fa82)
+
+### Phase 2 — Aiming & Strike (3-RRS leveling platform + flywheel)
+
+Once near the bell, the 3-RRS leveling platform fine-aims with inverse kinematics
+(incl. lead-aim for the oscillating target), then the flywheel launcher strikes twice.
+
+![Phase 2 aiming and strike](https://github.com/user-attachments/assets/7dc9e534-1b8b-4b0f-a8ee-525268ca57b2)
 
 ---
 
